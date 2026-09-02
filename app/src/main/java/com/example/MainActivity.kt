@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -21,6 +22,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 import com.example.ui.AppScreen
 import com.example.ui.FriendsBottomSheet
 import com.example.ui.HomeScreen
@@ -49,6 +51,7 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
     val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
     val friends by viewModel.friends.collectAsStateWithLifecycle()
     val savedRooms by viewModel.savedRooms.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
 
     var showEditProfileDialog by remember { mutableStateOf(false) }
     var showFriendsSheet by remember { mutableStateOf(false) }
@@ -96,8 +99,10 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
                             onCreateRoom = { name, url, title ->
                                 viewModel.createRoom(name, url, title)
                             },
-                            onJoinRoom = { roomId ->
-                                viewModel.joinRoom(roomId)
+                            onJoinRoom = { roomId, onSuccess, onError ->
+                                coroutineScope.launch {
+                                    viewModel.verifyAndJoinRoom(roomId, onSuccess, onError)
+                                }
                             },
                             onOpenProfile = { showEditProfileDialog = true },
                             onOpenFriends = { showFriendsSheet = true }

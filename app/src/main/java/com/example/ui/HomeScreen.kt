@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -75,7 +76,7 @@ fun HomeScreen(
     friends: List<Friend>,
     savedRooms: List<SavedRoom>,
     onCreateRoom: (roomName: String, initialVideoUrl: String?, initialVideoTitle: String?) -> Unit,
-    onJoinRoom: (roomId: String) -> Unit,
+    onJoinRoom: (roomId: String, onSuccess: () -> Unit, onError: (String) -> Unit) -> Unit,
     onOpenProfile: () -> Unit,
     onOpenFriends: () -> Unit
 ) {
@@ -347,7 +348,9 @@ fun HomeScreen(
                         border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onJoinRoom(room.id) }
+                            .clickable {
+                                onJoinRoom(room.id, {}, {})
+                            }
                             .testTag("saved_room_${room.id}")
                     ) {
                         Row(
@@ -376,7 +379,7 @@ fun HomeScreen(
                             }
 
                             Button(
-                                onClick = { onJoinRoom(room.id) },
+                                onClick = { onJoinRoom(room.id, {}, {}) },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = DarkSurfaceElevated,
                                     contentColor = AccentGold
@@ -407,9 +410,8 @@ fun HomeScreen(
     // Join Room Dialog
     if (showJoinDialog) {
         JoinRoomDialog(
-            onJoin = { code ->
-                onJoinRoom(code)
-                showJoinDialog = false
+            onJoin = { code, onSuccess, onError ->
+                onJoinRoom(code, onSuccess, onError)
             },
             onDismiss = { showJoinDialog = false }
         )
@@ -483,8 +485,8 @@ fun CreateRoomDialog(
                         selectedPreset = null
                         error = null
                     },
-                    label = { Text("Initial Video URL or Drive Link (Optional)") },
-                    placeholder = { Text("https://...") },
+                    label = { Text("YouTube URL or Drive Link (Optional)") },
+                    placeholder = { Text("https://youtube.com/watch?v=... or Drive link") },
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AccentGold,
@@ -515,7 +517,7 @@ fun CreateRoomDialog(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    VideoUrlResolver.CURATED_STREAMS.take(2).forEach { stream ->
+                    VideoUrlResolver.CURATED_STREAMS.take(3).forEach { stream ->
                         val isSel = selectedPreset == stream.title
                         Surface(
                             color = if (isSel) DarkSurfaceElevated else DarkSurfaceVariant,
@@ -541,8 +543,8 @@ fun CreateRoomDialog(
                                     )
                                 )
                                 Text(
-                                    text = "Preset",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = TextTertiary, fontSize = 10.sp)
+                                    text = if (stream.isYouTube) "YouTube" else "Stream",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = AccentCyan, fontSize = 10.sp)
                                 )
                             }
                         }
@@ -585,13 +587,14 @@ fun CreateRoomDialog(
 
 @Composable
 fun JoinRoomDialog(
-    onJoin: (roomId: String) -> Unit,
+    onJoin: (roomId: String, onSuccess: () -> Unit, onError: (String) -> Unit) -> Unit,
     onDismiss: () -> Unit
 ) {
     var roomInput by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    var isVerifying by remember { mutableStateOf(false) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(onDismissRequest = { if (!isVerifying) onDismiss() }) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
@@ -615,8 +618,10 @@ fun JoinRoomDialog(
                             color = TextPrimary
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    if (!isVerifying) {
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                        }
                     }
                 }
 
@@ -637,6 +642,7 @@ fun JoinRoomDialog(
                     },
                     placeholder = { Text("SARN-XXXX") },
                     singleLine = true,
+                    enabled = !isVerifying,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AccentGold,
                         unfocusedBorderColor = DarkBorder,
@@ -650,11 +656,22 @@ fun JoinRoomDialog(
                 )
 
                 if (error != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = error ?: "",
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
-                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(8.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = error ?: "",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Medium
+                            ),
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(20.dp))
@@ -665,15 +682,27 @@ fun JoinRoomDialog(
                         if (raw.isBlank()) {
                             error = "Please enter a room code"
                         } else {
-                            // Extract code if it's a URL like sarnas.stream/watch?room=SARN-XXXX
                             val code = if (raw.contains("room=")) {
                                 raw.substringAfter("room=").substringBefore("&")
                             } else {
                                 raw
                             }
-                            onJoin(code.uppercase())
+                            isVerifying = true
+                            error = null
+                            onJoin(
+                                code.uppercase(),
+                                {
+                                    isVerifying = false
+                                    onDismiss()
+                                },
+                                { errMsg ->
+                                    isVerifying = false
+                                    error = errMsg
+                                }
+                            )
                         }
                     },
+                    enabled = !isVerifying,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AccentGold,
                         contentColor = DarkBackground
@@ -684,7 +713,17 @@ fun JoinRoomDialog(
                         .height(48.dp)
                         .testTag("confirm_join_room_btn")
                 ) {
-                    Text("Join Room", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    if (isVerifying) {
+                        CircularProgressIndicator(
+                            color = DarkBackground,
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text("Verifying Room...", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    } else {
+                        Text("Join Room", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    }
                 }
             }
         }

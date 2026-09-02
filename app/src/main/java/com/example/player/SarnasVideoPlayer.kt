@@ -3,6 +3,8 @@ package com.example.player
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.Color as AndroidColor
+import android.graphics.Typeface
 import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -24,10 +26,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AltRoute
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.ClosedCaptionDisabled
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -40,6 +46,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.VolumeMute
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
@@ -49,6 +56,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -75,22 +84,48 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.extractor.mp4.Mp4Extractor
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import com.example.data.PlaybackAction
 import com.example.data.PlaybackState
 import com.example.sync.RoomSyncManager
+import com.example.ui.theme.AccentCyan
+import com.example.ui.theme.AccentGold
+import com.example.ui.theme.DarkBackground
+import com.example.ui.theme.DarkBorder
+import com.example.ui.theme.DarkSurface
+import com.example.ui.theme.DarkSurfaceElevated
+import com.example.ui.theme.DarkSurfaceVariant
+import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+data class SubtitleTrackInfo(
+    val groupIndex: Int,
+    val trackIndex: Int,
+    val language: String?,
+    val label: String?,
+    val isSelected: Boolean
+)
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -104,9 +139,14 @@ fun SarnasVideoPlayer(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
+    // Check if current video is a YouTube link
+    val youtubeVideoId = remember(playbackState.videoUrl) {
+        VideoUrlResolver.extractYouTubeVideoId(playbackState.videoUrl)
+    }
+    val isYouTube = youtubeVideoId != null || VideoUrlResolver.isYouTubeUrl(playbackState.videoUrl)
+
     var activePlayUrl by remember { mutableStateOf(playbackState.videoUrl) }
     var triedCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
-    var candidateIndex by remember { mutableIntStateOf(0) }
 
     var playerError by remember { mutableStateOf<String?>(null) }
     var isBuffering by remember { mutableStateOf(false) }
@@ -118,6 +158,11 @@ fun SarnasVideoPlayer(
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderProgress by remember { mutableFloatStateOf(0f) }
     var showDriveHelp by remember { mutableStateOf(false) }
+    var showSubtitleDialog by remember { mutableStateOf(false) }
+
+    // Subtitle tracks detected in current ExoPlayer video
+    var availableSubtitleTracks by remember { mutableStateOf<List<SubtitleTrackInfo>>(emptyList()) }
+    var customSubtitleUrl by remember { mutableStateOf("") }
 
     // Auto-hide controls timer
     LaunchedEffect(isControlsVisible, playbackState.isPlaying) {
@@ -134,11 +179,26 @@ fun SarnasVideoPlayer(
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(20000)
             .setReadTimeoutMs(30000)
+            .setDefaultRequestProperties(
+                mapOf(
+                    "Accept" to "*/*",
+                    "Range" to "bytes=0-"
+                )
+            )
+
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setMatroskaExtractorFlags(MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA)
+            .setMp4ExtractorFlags(Mp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA)
 
         val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
+
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
 
         ExoPlayer.Builder(context)
+            .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .build().apply {
                 repeatMode = Player.REPEAT_MODE_OFF
@@ -146,8 +206,8 @@ fun SarnasVideoPlayer(
             }
     }
 
-    fun loadMediaUrl(url: String, seekPosition: Long = 0L, playWhenReady: Boolean = false) {
-        if (url.isBlank()) return
+    fun loadMediaUrl(url: String, seekPosition: Long = 0L, playWhenReady: Boolean = false, externalSubUrl: String? = null) {
+        if (url.isBlank() || isYouTube) return
         try {
             playerError = null
             isBuffering = true
@@ -160,6 +220,20 @@ fun SarnasVideoPlayer(
                 url.contains(".m3u8", ignoreCase = true) -> builder.setMimeType(MimeTypes.APPLICATION_M3U8)
                 url.contains(".mpd", ignoreCase = true) -> builder.setMimeType(MimeTypes.APPLICATION_MPD)
                 url.contains(".mp4", ignoreCase = true) -> builder.setMimeType(MimeTypes.VIDEO_MP4)
+                url.contains(".mkv", ignoreCase = true) -> builder.setMimeType(MimeTypes.VIDEO_MATROSKA)
+                url.contains(".webm", ignoreCase = true) -> builder.setMimeType(MimeTypes.VIDEO_WEBM)
+            }
+
+            // External Subtitles (.srt, .vtt)
+            val subUri = if (!externalSubUrl.isNullOrBlank()) Uri.parse(externalSubUrl) else null
+            if (subUri != null) {
+                val subMime = if (externalSubUrl?.contains(".vtt", ignoreCase = true) == true) MimeTypes.TEXT_VTT else MimeTypes.APPLICATION_SUBRIP
+                val subConfig = MediaItem.SubtitleConfiguration.Builder(subUri)
+                    .setMimeType(subMime)
+                    .setLanguage("en")
+                    .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                    .build()
+                builder.setSubtitleConfigurations(listOf(subConfig))
             }
 
             exoPlayer.setMediaItem(builder.build())
@@ -181,10 +255,9 @@ fun SarnasVideoPlayer(
         if (nextCandidate != null) {
             triedCandidates = triedCandidates + nextCandidate
             activePlayUrl = nextCandidate
-            loadMediaUrl(nextCandidate, exoPlayer.currentPosition, true)
+            loadMediaUrl(nextCandidate, exoPlayer.currentPosition, true, customSubtitleUrl)
         } else {
-            // Re-try original with clean state
-            loadMediaUrl(playbackState.videoUrl, 0L, true)
+            loadMediaUrl(playbackState.videoUrl, 0L, true, customSubtitleUrl)
         }
     }
 
@@ -212,6 +285,29 @@ fun SarnasVideoPlayer(
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                val list = mutableListOf<SubtitleTrackInfo>()
+                for (groupIndex in 0 until tracks.groups.size) {
+                    val group = tracks.groups[groupIndex]
+                    if (group.type == C.TRACK_TYPE_TEXT) {
+                        for (trackIndex in 0 until group.length) {
+                            val format = group.getTrackFormat(trackIndex)
+                            val isSelected = group.isTrackSelected(trackIndex)
+                            list.add(
+                                SubtitleTrackInfo(
+                                    groupIndex = groupIndex,
+                                    trackIndex = trackIndex,
+                                    language = format.language ?: "und",
+                                    label = format.label ?: format.language ?: "Subtitle ${list.size + 1}",
+                                    isSelected = isSelected
+                                )
+                            )
+                        }
+                    }
+                }
+                availableSubtitleTracks = list
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 isBuffering = false
                 val isDrive = playbackState.videoUrl.contains("drive.google.com") ||
@@ -221,11 +317,10 @@ fun SarnasVideoPlayer(
                 val untried = alternatives.filter { !triedCandidates.contains(it) }
 
                 if (isDrive && untried.isNotEmpty()) {
-                    // Automatically attempt fallback endpoint before giving up
                     val next = untried.first()
                     triedCandidates = triedCandidates + next
                     activePlayUrl = next
-                    loadMediaUrl(next, exoPlayer.currentPosition, playbackState.isPlaying)
+                    loadMediaUrl(next, exoPlayer.currentPosition, playbackState.isPlaying, customSubtitleUrl)
                     return
                 }
 
@@ -253,26 +348,23 @@ fun SarnasVideoPlayer(
 
     // When videoUrl changes from sync or user action
     LaunchedEffect(playbackState.videoUrl) {
-        if (playbackState.videoUrl.isNotBlank()) {
+        if (!isYouTube && playbackState.videoUrl.isNotBlank()) {
             activePlayUrl = playbackState.videoUrl
             triedCandidates = listOf(playbackState.videoUrl)
-            loadMediaUrl(playbackState.videoUrl, playbackState.positionMs, playbackState.isPlaying)
+            loadMediaUrl(playbackState.videoUrl, playbackState.positionMs, playbackState.isPlaying, customSubtitleUrl)
         }
     }
 
     // Handle incoming synchronization updates (Play/Pause/Seek/Skip)
     LaunchedEffect(playbackState.updatedAt, playbackState.isPlaying, playbackState.lastAction) {
-        if (activePlayUrl.isNotBlank() && exoPlayer.playbackState != Player.STATE_IDLE) {
-            // Apply play / pause state
+        if (!isYouTube && activePlayUrl.isNotBlank() && exoPlayer.playbackState != Player.STATE_IDLE) {
             if (exoPlayer.playWhenReady != playbackState.isPlaying) {
                 exoPlayer.playWhenReady = playbackState.isPlaying
             }
 
-            // Calculate expected position taking elapsed time into account
             val elapsed = if (playbackState.isPlaying) System.currentTimeMillis() - playbackState.updatedAt else 0L
             val expectedPos = (playbackState.positionMs + elapsed).coerceAtLeast(0L)
 
-            // Drift detection: if drift > 1500ms or explicit SEEK/SKIP, align player
             val drift = kotlin.math.abs(exoPlayer.currentPosition - expectedPos)
             if (drift > 1500L || playbackState.lastAction == PlaybackAction.SEEK ||
                 playbackState.lastAction == PlaybackAction.SKIP_FORWARD ||
@@ -285,193 +377,161 @@ fun SarnasVideoPlayer(
 
     // Subtitles toggle synchronization
     LaunchedEffect(playbackState.subtitlesEnabled) {
-        val parameters = exoPlayer.trackSelectionParameters
-            .buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !playbackState.subtitlesEnabled)
-            .build()
-        exoPlayer.trackSelectionParameters = parameters
+        if (!isYouTube) {
+            val parameters = exoPlayer.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !playbackState.subtitlesEnabled)
+                .build()
+            exoPlayer.trackSelectionParameters = parameters
+        }
     }
 
     // Periodic position updater
-    LaunchedEffect(playbackState.isPlaying) {
+    LaunchedEffect(playbackState.isPlaying, isYouTube) {
         while (true) {
-            if (exoPlayer.playbackState == Player.STATE_READY) {
+            if (!isYouTube && exoPlayer.playbackState == Player.STATE_READY) {
                 currentPositionMs = exoPlayer.currentPosition
                 val dur = exoPlayer.duration
                 if (dur > 0) durationMs = dur
-                if (!isDraggingSlider && durationMs > 0) {
-                    sliderProgress = (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
-                }
             }
-            delay(400)
+            delay(500)
         }
     }
 
-    // Handle orientation / fullscreen
+    // Handle orientation & Fullscreen changes
     fun toggleFullscreen() {
-        val newFs = !isFullscreen
-        isFullscreen = newFs
+        val newFullscreen = !isFullscreen
+        isFullscreen = newFullscreen
+        onFullscreenToggle(newFullscreen)
+
         val activity = context as? Activity
-        activity?.let {
-            it.requestedOrientation = if (newFs) {
-                ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (activity != null) {
+            if (newFullscreen) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             } else {
-                ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             }
         }
-        onFullscreenToggle(newFs)
     }
+
+    val interactionSource = remember { MutableInteractionSource() }
 
     Box(
         modifier = modifier
-            .fillMaxSize()
             .background(Color.Black)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null
-            ) {
+            .clickable(interactionSource = interactionSource, indication = null) {
                 isControlsVisible = !isControlsVisible
             }
-            .testTag("video_player_container"),
+            .testTag("sarnas_video_player_box"),
         contentAlignment = Alignment.Center
     ) {
-        // ExoPlayer Surface
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = false
-                    layoutParams = FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
+        // Render either YouTube Player or Native ExoPlayer
+        if (isYouTube) {
+            YouTubeSyncPlayer(
+                videoId = youtubeVideoId ?: "dQw4w9WgXcQ",
+                playbackState = playbackState,
+                syncManager = syncManager,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        useController = false
+                        layoutParams = FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        // Modern, high contrast subtitle styling
+                        subtitleView?.apply {
+                            setUserDefaultStyle()
+                            setUserDefaultTextSize()
+                            setFractionalTextSize(0.053f)
+                            setStyle(
+                                CaptionStyleCompat(
+                                    AndroidColor.WHITE,
+                                    AndroidColor.parseColor("#CC111111"),
+                                    AndroidColor.TRANSPARENT,
+                                    CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW,
+                                    AndroidColor.BLACK,
+                                    Typeface.SANS_SERIF
+                                )
+                            )
+                        }
+                    }
+                },
+                update = { playerView ->
+                    playerView.player = exoPlayer
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
 
         // Buffering Indicator
-        if (isBuffering && playerError == null) {
+        if (isBuffering && !isYouTube) {
             CircularProgressIndicator(
-                color = Color(0xFFE5A93C),
+                color = AccentGold,
                 strokeWidth = 3.dp,
                 modifier = Modifier.size(48.dp)
             )
         }
 
-        // Error message overlay with actionable troubleshooting
-        if (playerError != null) {
+        // Error Banner
+        if (playerError != null && !isYouTube) {
             Surface(
-                color = Color(0xF014161F),
-                shape = RoundedCornerShape(20.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE5A93C).copy(alpha = 0.4f)),
+                color = DarkSurface.copy(alpha = 0.95f),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
                 modifier = Modifier
-                    .padding(20.dp)
                     .fillMaxWidth(0.92f)
+                    .padding(16.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(20.dp),
+                    modifier = Modifier.padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Icon(
                         imageVector = Icons.Default.ErrorOutline,
                         contentDescription = "Error",
-                        tint = Color(0xFFE5A93C),
-                        modifier = Modifier.size(38.dp)
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(36.dp)
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Video Stream Issue",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF0F2F8)
-                        )
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = playerError ?: "Error",
-                        style = MaterialTheme.typography.bodySmall.copy(
-                            color = Color(0xFFB0B5C6),
-                            lineHeight = 18.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 6.dp),
+                        text = playerError ?: "Playback Error",
+                        color = TextPrimary,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Google Drive specific help box
-                    if (playbackState.videoUrl.contains("drive.google.com") || playbackState.videoUrl.contains("googleusercontent.com")) {
-                        Surface(
-                            color = Color(0xFF1E2130),
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { showDriveHelp = !showDriveHelp }
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.HelpOutline, contentDescription = null, tint = Color(0xFF4E95FF), modifier = Modifier.size(16.dp))
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("How to make Google Drive links public", style = MaterialTheme.typography.labelMedium.copy(color = Color(0xFF4E95FF), fontWeight = FontWeight.SemiBold))
-                                    }
-                                    Text(if (showDriveHelp) "Hide" else "Show", style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFB0B5C6)))
-                                }
-
-                                if (showDriveHelp) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text("1. Open Google Drive and find the video.\n2. Tap 'Share' (or 3 dots > Share).\n3. Under 'General access', change from 'Restricted' to 'Anyone with the link' (Viewer).\n4. Tap 'Copy link' and paste into SARNAS.",
-                                        style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFFF0F2F8), fontSize = 11.sp, lineHeight = 16.sp))
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(14.dp))
-                    }
-
-                    // Action Buttons: Try Alternative Route | Retry
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
-                            onClick = {
-                                tryNextAlternativeSource()
-                            },
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.weight(1f).height(40.dp)
+                            onClick = { tryNextAlternativeSource() },
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentGold),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.AltRoute, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color(0xFF4E95FF))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Alternate CDN", style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF4E95FF)))
+                            Icon(Icons.Default.AltRoute, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Try Alt Route")
                         }
-
                         Button(
                             onClick = {
-                                playerError = null
-                                loadMediaUrl(activePlayUrl, exoPlayer.currentPosition, true)
+                                loadMediaUrl(playbackState.videoUrl, 0L, true, customSubtitleUrl)
                             },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFFE5A93C),
-                                contentColor = Color(0xFF0B0C10)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            modifier = Modifier.weight(1f).height(40.dp).testTag("retry_video_button")
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentGold, contentColor = DarkBackground),
+                            shape = RoundedCornerShape(10.dp)
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Retry", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Retry")
                         }
                     }
                 }
             }
         }
 
-        // Video Controls Overlay (Play, Pause, +/- 15s, Seek Bar, Mute, CC, Fullscreen)
+        // Controls Overlay (Only for non-YouTube or when visible)
         AnimatedVisibility(
             visible = isControlsVisible,
             enter = fadeIn(),
@@ -484,228 +544,442 @@ fun SarnasVideoPlayer(
                     .background(
                         Brush.verticalGradient(
                             colors = listOf(
-                                Color.Black.copy(alpha = 0.7f),
+                                Color.Black.copy(alpha = 0.8f),
                                 Color.Transparent,
                                 Color.Black.copy(alpha = 0.85f)
                             )
                         )
                     )
             ) {
-                // Top overlay: Video Title & Live Sync Badge
+                // Top Action Bar inside Video Player
                 Row(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                        .align(Alignment.TopCenter)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = if (playbackState.videoTitle.isNotBlank()) playbackState.videoTitle else "No Video Selected",
+                            text = playbackState.videoTitle.ifBlank { "Stream" },
                             style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color.White,
-                                fontSize = 15.sp
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
                             ),
                             maxLines = 1
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(6.dp)
-                                    .background(Color(0xFF4CAF50), CircleShape)
+                        val badge = when {
+                            isYouTube -> "YouTube Stream (CC Sync)"
+                            playbackState.videoUrl.contains("drive.google.com") || playbackState.videoUrl.contains("googleusercontent.com") -> "Google Drive Video"
+                            playbackState.videoUrl.contains(".m3u8") -> "HLS Live Stream"
+                            else -> "Direct Video Stream"
+                        }
+                        Text(
+                            text = badge,
+                            style = MaterialTheme.typography.labelSmall.copy(color = AccentGold, fontSize = 11.sp)
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        // Subtitles track dialog button
+                        IconButton(
+                            onClick = { showSubtitleDialog = true },
+                            modifier = Modifier.testTag("player_subtitle_dialog_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Subtitles,
+                                contentDescription = "Subtitles",
+                                tint = if (playbackState.subtitlesEnabled) AccentGold else TextTertiary
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Synced with room",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = Color(0xFFB0B5C6),
-                                    fontSize = 11.sp
-                                )
+                        }
+
+                        // CC Quick Toggle
+                        IconButton(
+                            onClick = {
+                                val nextState = !playbackState.subtitlesEnabled
+                                syncManager.toggleSubtitles(nextState)
+                            },
+                            modifier = Modifier.testTag("player_subtitles_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (playbackState.subtitlesEnabled) Icons.Default.ClosedCaption else Icons.Default.ClosedCaptionDisabled,
+                                contentDescription = "Toggle Subtitles",
+                                tint = if (playbackState.subtitlesEnabled) AccentGold else TextTertiary
+                            )
+                        }
+
+                        // Mute button
+                        IconButton(
+                            onClick = {
+                                isMuted = !isMuted
+                                exoPlayer.volume = if (isMuted) 0f else 1f
+                            },
+                            modifier = Modifier.testTag("player_mute_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.Default.VolumeMute else Icons.Default.VolumeUp,
+                                contentDescription = "Mute",
+                                tint = TextPrimary
+                            )
+                        }
+
+                        // Fullscreen Toggle
+                        IconButton(
+                            onClick = { toggleFullscreen() },
+                            modifier = Modifier.testTag("player_fullscreen_toggle")
+                        ) {
+                            Icon(
+                                imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                contentDescription = "Fullscreen",
+                                tint = TextPrimary
                             )
                         }
                     }
                 }
 
-                // Center Controls: Rewind 15s | Play/Pause | Forward 15s
+                // Center Play / Rewind / Skip Controls (For both standard and YouTube playback)
                 Row(
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .fillMaxWidth(0.75f),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(28.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 15s Skip Backward
+                    // Rewind 10s
                     IconButton(
                         onClick = {
-                            val cur = exoPlayer.currentPosition
-                            syncManager.sendSkipBackward(cur, currentUserName)
+                            val newPos = (currentPositionMs - 10000L).coerceAtLeast(0L)
+                            currentPositionMs = newPos
+                            if (!isYouTube) exoPlayer.seekTo(newPos)
+                            syncManager.sendSkipBackward(newPos)
                         },
                         modifier = Modifier
-                            .size(52.dp)
-                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                            .testTag("skip_backward_15_button")
+                            .size(48.dp)
+                            .background(DarkSurfaceVariant.copy(alpha = 0.6f), CircleShape)
+                            .testTag("player_rewind_btn")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Replay10,
-                            contentDescription = "Rewind 15 seconds",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
+                        Icon(Icons.Default.Replay10, contentDescription = "Rewind 10s", tint = TextPrimary, modifier = Modifier.size(26.dp))
                     }
 
                     // Main Play / Pause Button
-                    IconButton(
-                        onClick = {
-                            val cur = exoPlayer.currentPosition
-                            if (playbackState.isPlaying) {
-                                syncManager.sendPause(cur, currentUserName)
-                            } else {
-                                syncManager.sendPlay(cur, currentUserName)
-                            }
-                        },
+                    Box(
                         modifier = Modifier
-                            .size(72.dp)
-                            .background(Color(0xFFE5A93C), CircleShape)
-                            .testTag("play_pause_button")
+                            .size(68.dp)
+                            .clip(CircleShape)
+                            .background(AccentGold)
+                            .clickable {
+                                val shouldPlay = !playbackState.isPlaying
+                                if (!isYouTube) {
+                                    exoPlayer.playWhenReady = shouldPlay
+                                }
+                                if (shouldPlay) {
+                                    syncManager.sendPlay(currentPositionMs)
+                                } else {
+                                    syncManager.sendPause(currentPositionMs)
+                                }
+                            }
+                            .testTag("player_main_play_pause_btn"),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             imageVector = if (playbackState.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = if (playbackState.isPlaying) "Pause" else "Play",
-                            tint = Color(0xFF0B0C10),
-                            modifier = Modifier.size(40.dp)
+                            tint = DarkBackground,
+                            modifier = Modifier.size(38.dp)
                         )
                     }
 
-                    // 15s Skip Forward
+                    // Forward 10s
                     IconButton(
                         onClick = {
-                            val cur = exoPlayer.currentPosition
-                            syncManager.sendSkipForward(cur, durationMs, currentUserName)
+                            val newPos = currentPositionMs + 10000L
+                            currentPositionMs = newPos
+                            if (!isYouTube) exoPlayer.seekTo(newPos)
+                            syncManager.sendSkipForward(newPos)
                         },
                         modifier = Modifier
-                            .size(52.dp)
-                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                            .testTag("skip_forward_15_button")
+                            .size(48.dp)
+                            .background(DarkSurfaceVariant.copy(alpha = 0.6f), CircleShape)
+                            .testTag("player_forward_btn")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Forward10,
-                            contentDescription = "Forward 15 seconds",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
+                        Icon(Icons.Default.Forward10, contentDescription = "Forward 10s", tint = TextPrimary, modifier = Modifier.size(26.dp))
                     }
                 }
 
-                // Bottom Control Bar: Time, Seekbar, CC, Mute, Fullscreen
+                // Bottom Timeline Bar (Progress Slider & Timestamps)
                 Column(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    // Scrubbable Slider
+                    val maxDur = if (durationMs > 0) durationMs else (playbackState.durationMs.takeIf { it > 0 } ?: 1L)
+                    val activePos = if (isDraggingSlider) (sliderProgress * maxDur).toLong() else currentPositionMs
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = formatTime(activePos),
+                            style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary, fontWeight = FontWeight.Medium)
+                        )
+                        Text(
+                            text = formatTime(maxDur),
+                            style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary, fontWeight = FontWeight.Medium)
+                        )
+                    }
+
                     Slider(
-                        value = if (isDraggingSlider) sliderProgress else (if (durationMs > 0) (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f),
-                        onValueChange = { newValue ->
+                        value = if (maxDur > 0) (activePos.toFloat() / maxDur.toFloat()).coerceIn(0f, 1f) else 0f,
+                        onValueChange = { frac ->
                             isDraggingSlider = true
-                            sliderProgress = newValue
+                            sliderProgress = frac
                         },
                         onValueChangeFinished = {
-                            val targetMs = (sliderProgress * durationMs).toLong()
-                            syncManager.sendSeek(targetMs, currentUserName)
                             isDraggingSlider = false
+                            val targetMs = (sliderProgress * maxDur).toLong()
+                            currentPositionMs = targetMs
+                            if (!isYouTube) exoPlayer.seekTo(targetMs)
+                            syncManager.sendSeek(targetMs)
                         },
                         colors = SliderDefaults.colors(
-                            thumbColor = Color(0xFFE5A93C),
-                            activeTrackColor = Color(0xFFE5A93C),
+                            thumbColor = AccentGold,
+                            activeTrackColor = AccentGold,
                             inactiveTrackColor = Color.White.copy(alpha = 0.25f)
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(24.dp)
-                            .testTag("video_seek_bar")
+                            .testTag("player_timeline_slider")
                     )
+                }
+            }
+        }
+    }
 
+    // Subtitle & Captions Selection Dialog
+    if (showSubtitleDialog) {
+        SubtitleSelectionDialog(
+            isYouTube = isYouTube,
+            subtitlesEnabled = playbackState.subtitlesEnabled,
+            availableTracks = availableSubtitleTracks,
+            onToggleSubtitles = { enabled ->
+                syncManager.toggleSubtitles(enabled)
+            },
+            onSelectTrack = { track ->
+                // Apply specific track to ExoPlayer
+                val tracks = exoPlayer.currentTracks
+                val group = tracks.groups.getOrNull(track.groupIndex)
+                if (group != null) {
+                    val override = androidx.media3.common.TrackSelectionOverride(group.mediaTrackGroup, track.trackIndex)
+                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                        .buildUpon()
+                        .setOverrideForType(override)
+                        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .build()
+                }
+                syncManager.toggleSubtitles(true)
+                showSubtitleDialog = false
+            },
+            onApplyExternalSubtitle = { subUrl ->
+                customSubtitleUrl = subUrl
+                loadMediaUrl(playbackState.videoUrl, currentPositionMs, playbackState.isPlaying, subUrl)
+                syncManager.toggleSubtitles(true)
+                showSubtitleDialog = false
+            },
+            onDismiss = { showSubtitleDialog = false }
+        )
+    }
+}
+
+@Composable
+fun SubtitleSelectionDialog(
+    isYouTube: Boolean,
+    subtitlesEnabled: Boolean,
+    availableTracks: List<SubtitleTrackInfo>,
+    onToggleSubtitles: (Boolean) -> Unit,
+    onSelectTrack: (SubtitleTrackInfo) -> Unit,
+    onApplyExternalSubtitle: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var externalUrlInput by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = DarkSurface,
+            shape = RoundedCornerShape(20.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+            modifier = Modifier.fillMaxWidth().testTag("subtitles_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Subtitles & Captions",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Toggle switch
+                Surface(
+                    color = if (subtitlesEnabled) DarkSurfaceElevated else DarkSurfaceVariant,
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (subtitlesEnabled) AccentGold else DarkBorder),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onToggleSubtitles(!subtitlesEnabled) }
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.padding(14.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Timecode
-                        val formattedCurrent = formatDuration(if (isDraggingSlider) (sliderProgress * durationMs).toLong() else currentPositionMs)
-                        val formattedTotal = formatDuration(durationMs)
                         Text(
-                            text = "$formattedCurrent / $formattedTotal",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = Color.White.copy(alpha = 0.85f),
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 12.sp
+                            text = if (subtitlesEnabled) "Subtitles: Enabled (On)" else "Subtitles: Disabled (Off)",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (subtitlesEnabled) AccentGold else TextPrimary
                             )
                         )
+                        Icon(
+                            imageVector = if (subtitlesEnabled) Icons.Default.ClosedCaption else Icons.Default.ClosedCaptionDisabled,
+                            contentDescription = null,
+                            tint = if (subtitlesEnabled) AccentGold else TextSecondary
+                        )
+                    }
+                }
 
-                        // Action icons: CC, Mute, Fullscreen
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            // CC / Subtitles Toggle
-                            IconButton(
-                                onClick = {
-                                    syncManager.setSubtitlesEnabled(!playbackState.subtitlesEnabled)
-                                },
-                                modifier = Modifier.size(38.dp).testTag("subtitles_toggle_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (playbackState.subtitlesEnabled) Icons.Default.ClosedCaption else Icons.Default.ClosedCaptionDisabled,
-                                    contentDescription = "Subtitles",
-                                    tint = if (playbackState.subtitlesEnabled) Color(0xFFE5A93C) else Color.White.copy(alpha = 0.7f),
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
+                if (!isYouTube) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Available Tracks in Video:",
+                        style = MaterialTheme.typography.labelMedium.copy(color = TextSecondary)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                            // Mute / Unmute
-                            IconButton(
-                                onClick = {
-                                    isMuted = !isMuted
-                                    exoPlayer.volume = if (isMuted) 0f else 1f
-                                },
-                                modifier = Modifier.size(38.dp).testTag("mute_toggle_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (isMuted) Icons.Default.VolumeMute else Icons.Default.VolumeUp,
-                                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-
-                            // Fullscreen Toggle
-                            IconButton(
-                                onClick = { toggleFullscreen() },
-                                modifier = Modifier.size(38.dp).testTag("fullscreen_toggle_button")
-                            ) {
-                                Icon(
-                                    imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                    contentDescription = "Toggle Fullscreen",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(24.dp)
-                                )
+                    if (availableTracks.isEmpty()) {
+                        Text(
+                            text = "No embedded subtitle tracks detected in file.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = TextTertiary)
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().height(120.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(availableTracks) { track ->
+                                Surface(
+                                    color = if (track.isSelected) DarkSurfaceElevated else DarkSurfaceVariant,
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, if (track.isSelected) AccentGold else DarkBorder),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelectTrack(track) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = track.label ?: "Track ${track.trackIndex + 1} (${track.language})",
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = if (track.isSelected) AccentGold else TextPrimary,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                        )
+                                        if (track.isSelected) {
+                                            Icon(Icons.Default.Check, contentDescription = "Active", tint = AccentGold, modifier = Modifier.size(16.dp))
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Or Load Subtitle by URL (.srt / .vtt):",
+                        style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    OutlinedTextField(
+                        value = externalUrlInput,
+                        onValueChange = { externalUrlInput = it },
+                        placeholder = { Text("https://.../subtitles.vtt") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentGold,
+                            unfocusedBorderColor = DarkBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedContainerColor = DarkSurfaceVariant,
+                            unfocusedContainerColor = DarkSurfaceVariant
+                        ),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Button(
+                        onClick = {
+                            if (externalUrlInput.isNotBlank()) {
+                                onApplyExternalSubtitle(externalUrlInput.trim())
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentCyan, contentColor = DarkBackground),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().height(40.dp)
+                    ) {
+                        Text("Apply Subtitle URL", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                    }
+                } else {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "YouTube automated and creator captions are supported. Toggling CC will synchronize captions across all connected devices.",
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextTertiary)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant, contentColor = TextPrimary),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth().height(42.dp)
+                ) {
+                    Text("Done")
                 }
             }
         }
     }
 }
 
-private fun formatDuration(millis: Long): String {
+private fun formatTime(millis: Long): String {
     val totalSeconds = (millis / 1000).coerceAtLeast(0)
-    val hours = totalSeconds / 3600
-    val minutes = (totalSeconds % 3600) / 60
+    val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
+    val hours = minutes / 60
     return if (hours > 0) {
-        "%d:%02d:%02d".format(hours, minutes, seconds)
+        String.format("%d:%02d:%02d", hours, minutes % 60, seconds)
     } else {
-        "%02d:%02d".format(minutes, seconds)
+        String.format("%02d:%02d", minutes, seconds)
     }
 }

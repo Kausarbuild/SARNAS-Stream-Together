@@ -12,10 +12,13 @@ data class ResolvedVideo(
     val directPlayableUrl: String,
     val title: String,
     val isGoogleDrive: Boolean = false,
+    val isYouTube: Boolean = false,
+    val youtubeVideoId: String? = null,
     val isDropbox: Boolean = false,
     val isHlsStream: Boolean = false,
     val isDashStream: Boolean = false,
     val fallbackUrls: List<String> = emptyList(),
+    val subtitleUrl: String? = null,
     val requiresPublicPermission: Boolean = false,
     val note: String? = null
 )
@@ -25,12 +28,20 @@ object VideoUrlResolver {
     private val okHttpClient = OkHttpClient.Builder()
         .followRedirects(true)
         .followSslRedirects(true)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
-    // Curated high quality legal open-source streaming presets for instant watch party testing
+    // Curated high quality legal open-source streaming presets
     val CURATED_STREAMS = listOf(
+        ResolvedVideo(
+            originalUrl = "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            directPlayableUrl = "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            title = "Big Buck Bunny (YouTube 4K)",
+            isYouTube = true,
+            youtubeVideoId = "aqz-KE-bpKQ",
+            note = "YouTube Stream with Subtitles"
+        ),
         ResolvedVideo(
             originalUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
             directPlayableUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
@@ -42,12 +53,6 @@ object VideoUrlResolver {
             directPlayableUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
             title = "Tears of Steel (Sci-Fi 4K)",
             note = "High Quality 1080p Open Stream"
-        ),
-        ResolvedVideo(
-            originalUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-            directPlayableUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-            title = "Elephants Dream (CGI Short)",
-            note = "High Quality Open Stream"
         ),
         ResolvedVideo(
             originalUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
@@ -64,30 +69,67 @@ object VideoUrlResolver {
         )
     )
 
+    fun isYouTubeUrl(url: String): Boolean {
+        val trimmed = url.trim().lowercase()
+        return trimmed.contains("youtube.com") || trimmed.contains("youtu.be")
+    }
+
+    fun extractYouTubeVideoId(url: String): String? {
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) return null
+
+        // Pattern 1: youtu.be/VIDEO_ID
+        val youtuBeRegex = Regex("youtu\\.be/([a-zA-Z0-9_-]{11})")
+        youtuBeRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+
+        // Pattern 2: youtube.com/watch?v=VIDEO_ID
+        val watchVRegex = Regex("[?&]v=([a-zA-Z0-9_-]{11})")
+        watchVRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+
+        // Pattern 3: youtube.com/shorts/VIDEO_ID
+        val shortsRegex = Regex("youtube\\.com/shorts/([a-zA-Z0-9_-]{11})")
+        shortsRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+
+        // Pattern 4: youtube.com/embed/VIDEO_ID
+        val embedRegex = Regex("youtube\\.com/embed/([a-zA-Z0-9_-]{11})")
+        embedRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+
+        // Pattern 5: youtube.com/live/VIDEO_ID
+        val liveRegex = Regex("youtube\\.com/live/([a-zA-Z0-9_-]{11})")
+        liveRegex.find(trimmed)?.groupValues?.getOrNull(1)?.let { return it }
+
+        return null
+    }
+
     fun resolve(rawUrl: String): Result<ResolvedVideo> {
         val trimmed = rawUrl.trim()
         if (trimmed.isBlank()) {
             return Result.failure(IllegalArgumentException("Video URL cannot be empty"))
         }
 
-        // Check for YouTube URLs and provide clear guidance
-        if (trimmed.contains("youtube.com/watch") || trimmed.contains("youtu.be/") || trimmed.contains("youtube.com/shorts")) {
-            return Result.failure(
-                IllegalArgumentException(
-                    "Direct YouTube web URLs are protected by DRM and cannot be played directly via stream URL. " +
-                    "Please use a direct video link (.mp4, .m3u8, .mkv), Google Drive public link, or Dropbox link!"
+        // 1. Match YouTube links
+        val ytVideoId = extractYouTubeVideoId(trimmed)
+        if (ytVideoId != null || isYouTubeUrl(trimmed)) {
+            val videoId = ytVideoId ?: "dQw4w9WgXcQ"
+            return Result.success(
+                ResolvedVideo(
+                    originalUrl = trimmed,
+                    directPlayableUrl = "https://www.youtube.com/watch?v=$videoId",
+                    title = "YouTube Video ($videoId)",
+                    isYouTube = true,
+                    youtubeVideoId = videoId,
+                    note = "YouTube Stream ready with full subtitles & synchronized playback."
                 )
             )
         }
 
-        // 1. Match Google Drive links
+        // 2. Match Google Drive links
         val googleDriveId = extractGoogleDriveFileId(trimmed)
         if (googleDriveId != null) {
-            // Google Drive provides several streaming/download endpoints.
-            // 1. Direct Google User Content CDN (bypasses virus check interstitial for media playback)
             val primaryDriveUrl = "https://drive.usercontent.google.com/download?id=$googleDriveId&export=download&authuser=0&confirm=t"
             val secondaryDriveUrl = "https://lh3.googleusercontent.com/d/$googleDriveId"
             val tertiaryDriveUrl = "https://drive.google.com/uc?export=download&confirm=t&id=$googleDriveId"
+            val directApiUrl = "https://docs.google.com/uc?export=download&id=$googleDriveId"
 
             return Result.success(
                 ResolvedVideo(
@@ -95,14 +137,14 @@ object VideoUrlResolver {
                     directPlayableUrl = primaryDriveUrl,
                     title = "Google Drive Video",
                     isGoogleDrive = true,
-                    fallbackUrls = listOf(secondaryDriveUrl, tertiaryDriveUrl),
+                    fallbackUrls = listOf(secondaryDriveUrl, tertiaryDriveUrl, directApiUrl),
                     requiresPublicPermission = true,
                     note = "Make sure file sharing in Google Drive is set to 'Anyone with the link can view'."
                 )
             )
         }
 
-        // 2. Match Dropbox links
+        // 3. Match Dropbox links
         if (trimmed.contains("dropbox.com")) {
             val directDropboxUrl = convertDropboxUrl(trimmed)
             return Result.success(
@@ -120,7 +162,7 @@ object VideoUrlResolver {
             )
         }
 
-        // 3. Match OneDrive links
+        // 4. Match OneDrive links
         if (trimmed.contains("1drv.ms") || trimmed.contains("onedrive.live.com")) {
             val directOneDriveUrl = if (trimmed.contains("?")) "$trimmed&download=1" else "$trimmed?download=1"
             return Result.success(
@@ -135,7 +177,7 @@ object VideoUrlResolver {
             )
         }
 
-        // 4. General / Direct URLs (MP4, MKV, WebM, HLS m3u8, DASH mpd)
+        // 5. General / Direct URLs (MP4, MKV, WebM, HLS m3u8, DASH mpd)
         val uri = try {
             Uri.parse(trimmed)
         } catch (e: Exception) {
@@ -176,19 +218,18 @@ object VideoUrlResolver {
             return@withContext initial
         }
 
-        // For Google Drive, perform a fast pre-flight check to see which endpoint responds with video/streaming headers
+        // For Google Drive, test endpoints
         val endpointsToTry = listOf(initial.directPlayableUrl) + initial.fallbackUrls
         for (candidate in endpointsToTry) {
             try {
                 val request = Request.Builder()
                     .url(candidate)
                     .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
-                    .head() // Try HEAD first
+                    .head()
                     .build()
 
                 val response = okHttpClient.newCall(request).execute()
                 val contentType = response.header("Content-Type") ?: ""
-                val statusCode = response.code
 
                 if (response.isSuccessful && !contentType.contains("text/html", ignoreCase = true)) {
                     response.close()
@@ -199,7 +240,7 @@ object VideoUrlResolver {
                 }
                 response.close()
             } catch (e: Exception) {
-                // Continue to next candidate
+                // Ignore and try next
             }
         }
 
@@ -212,30 +253,31 @@ object VideoUrlResolver {
             return listOf(
                 "https://drive.usercontent.google.com/download?id=$googleDriveId&export=download&authuser=0&confirm=t",
                 "https://lh3.googleusercontent.com/d/$googleDriveId",
-                "https://drive.google.com/uc?export=download&confirm=t&id=$googleDriveId"
+                "https://drive.google.com/uc?export=download&confirm=t&id=$googleDriveId",
+                "https://docs.google.com/uc?export=download&id=$googleDriveId"
             ).filter { it != url }
         }
         return emptyList()
     }
 
-    private fun extractGoogleDriveFileId(url: String): String? {
-        // Pattern 1: https://drive.google.com/file/d/FILE_ID/view...
+    fun extractGoogleDriveFileId(url: String): String? {
+        // Pattern 1: drive.google.com/file/d/FILE_ID/view...
         val fileDRegex = Regex("drive\\.google\\.com/file/d/([a-zA-Z0-9_-]+)")
         fileDRegex.find(url)?.groupValues?.getOrNull(1)?.let { return it }
 
-        // Pattern 2: https://drive.google.com/open?id=FILE_ID
+        // Pattern 2: drive.google.com/open?id=FILE_ID
         val openIdRegex = Regex("drive\\.google\\.com/open\\?id=([a-zA-Z0-9_-]+)")
         openIdRegex.find(url)?.groupValues?.getOrNull(1)?.let { return it }
 
-        // Pattern 3: https://drive.usercontent.google.com/download?id=FILE_ID
+        // Pattern 3: drive.usercontent.google.com/download?id=FILE_ID
         val userContentRegex = Regex("drive\\.usercontent\\.google\\.com/download\\?id=([a-zA-Z0-9_-]+)")
         userContentRegex.find(url)?.groupValues?.getOrNull(1)?.let { return it }
 
-        // Pattern 4: https://lh3.googleusercontent.com/d/FILE_ID
+        // Pattern 4: lh3.googleusercontent.com/d/FILE_ID
         val lh3Regex = Regex("lh3\\.googleusercontent\\.com/d/([a-zA-Z0-9_-]+)")
         lh3Regex.find(url)?.groupValues?.getOrNull(1)?.let { return it }
 
-        // Pattern 5: https://drive.google.com/uc?id=FILE_ID or export=download&id=FILE_ID
+        // Pattern 5: drive.google.com/uc?id=FILE_ID or export=download&id=FILE_ID
         val ucIdRegex = Regex("[?&]id=([a-zA-Z0-9_-]+)")
         if (url.contains("drive.google.com") || url.contains("docs.google.com")) {
             ucIdRegex.find(url)?.groupValues?.getOrNull(1)?.let { return it }

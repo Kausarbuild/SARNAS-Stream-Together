@@ -8,6 +8,7 @@ import com.example.data.SavedRoom
 import com.example.data.UserProfile
 import com.example.data.UserRepository
 import com.example.sync.RoomSyncManager
+import com.example.sync.RoomVerificationResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -99,6 +100,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         _currentScreen.value = AppScreen.WATCH_ROOM
+    }
+
+    suspend fun verifyAndJoinRoom(
+        roomId: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val user = userProfile.value
+        if (user == null) {
+            onError("Profile not loaded. Please set up profile first.")
+            return
+        }
+
+        val cleanRoomId = roomId.trim().uppercase()
+        if (cleanRoomId.length < 3) {
+            onError("Please enter a valid room code (e.g. SARN-1234).")
+            return
+        }
+
+        when (val result = syncManager.verifyRoomExists(cleanRoomId)) {
+            is RoomVerificationResult.Found -> {
+                val roomName = result.roomName ?: "Watch Room ($cleanRoomId)"
+                syncManager.joinRoom(
+                    roomId = cleanRoomId,
+                    roomName = roomName,
+                    currentUser = user,
+                    isHost = false
+                )
+
+                repository.saveRecentRoom(
+                    id = cleanRoomId,
+                    name = roomName,
+                    hostName = result.hostName ?: "Host",
+                    videoUrl = null,
+                    videoTitle = null
+                )
+
+                _currentScreen.value = AppScreen.WATCH_ROOM
+                onSuccess()
+            }
+            is RoomVerificationResult.NotFound -> {
+                onError(result.reason)
+            }
+            is RoomVerificationResult.Error -> {
+                onError(result.message)
+            }
+        }
     }
 
     fun joinRoom(roomId: String) {

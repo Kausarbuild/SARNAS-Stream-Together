@@ -71,6 +71,10 @@ class RoomSyncManager private constructor() {
 
     val connectionState: StateFlow<ConnectionState> = networkClient.connectionState
 
+    suspend fun verifyRoomExists(roomId: String): RoomVerificationResult {
+        return networkClient.verifyRoomExists(roomId)
+    }
+
     fun joinRoom(
         roomId: String,
         roomName: String,
@@ -117,10 +121,11 @@ class RoomSyncManager private constructor() {
         // Connect to Realtime Network Bus
         networkClient.connect(cleanRoomId)
 
-        // Broadcast JOIN message over network
+        // Broadcast ROOM_ANNOUNCE or JOIN message over network
+        val announceType = if (isHost) "ROOM_ANNOUNCE" else "JOIN"
         networkClient.broadcast(
             RealtimeMessage(
-                type = "JOIN",
+                type = announceType,
                 roomId = cleanRoomId,
                 senderId = currentUser.id,
                 senderName = currentUser.name,
@@ -128,7 +133,9 @@ class RoomSyncManager private constructor() {
                 avatarColorHex = currentUser.avatarColorHex,
                 isHost = isHost,
                 isCameraOn = _isCameraEnabled.value,
-                isMuted = !_isMicrophoneEnabled.value
+                isMuted = !_isMicrophoneEnabled.value,
+                videoUrl = initialVideoUrl,
+                videoTitle = initialVideoTitle
             )
         )
 
@@ -191,7 +198,7 @@ class RoomSyncManager private constructor() {
 
         scope.launch {
             when (msg.type) {
-                "JOIN" -> {
+                "ROOM_ANNOUNCE", "JOIN" -> {
                     val newParticipant = RoomParticipant(
                         id = msg.senderId,
                         name = msg.senderName,
@@ -202,7 +209,7 @@ class RoomSyncManager private constructor() {
                         isMuted = msg.isMuted
                     )
                     addOrUpdateParticipant(newParticipant)
-                    notifySync("${msg.senderName} joined the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
+                    notifySync("${msg.senderName} is in the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
 
                     // If we have an active video stream, reply with SYNC_STATE so the new user immediately sees it
                     val curPlay = _playbackState.value
@@ -220,6 +227,13 @@ class RoomSyncManager private constructor() {
                                 durationMs = curPlay.durationMs,
                                 subtitlesEnabled = curPlay.subtitlesEnabled
                             )
+                        )
+                    } else if (msg.videoUrl != null && msg.videoUrl.isNotBlank()) {
+                        _playbackState.value = _playbackState.value.copy(
+                            videoUrl = msg.videoUrl,
+                            videoTitle = msg.videoTitle ?: "Video",
+                            isPlaying = false,
+                            updatedAt = System.currentTimeMillis()
                         )
                     }
                 }
@@ -438,7 +452,7 @@ class RoomSyncManager private constructor() {
     }
 
     // Playback control actions that broadcast live sync to all devices
-    fun sendPlay(currentPosMs: Long, senderName: String) {
+    fun sendPlay(currentPosMs: Long, senderName: String = currentUserProfile?.name ?: "User") {
         _playbackState.value = _playbackState.value.copy(
             isPlaying = true,
             positionMs = currentPosMs,
@@ -460,7 +474,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendPause(currentPosMs: Long, senderName: String) {
+    fun sendPause(currentPosMs: Long, senderName: String = currentUserProfile?.name ?: "User") {
         _playbackState.value = _playbackState.value.copy(
             isPlaying = false,
             positionMs = currentPosMs,
@@ -482,7 +496,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendSeek(targetPosMs: Long, senderName: String) {
+    fun sendSeek(targetPosMs: Long, senderName: String = currentUserProfile?.name ?: "User") {
         _playbackState.value = _playbackState.value.copy(
             positionMs = targetPosMs,
             updatedAt = System.currentTimeMillis(),
@@ -504,7 +518,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendSkipForward(currentPosMs: Long, durationMs: Long, senderName: String) {
+    fun sendSkipForward(currentPosMs: Long, durationMs: Long = _playbackState.value.durationMs, senderName: String = currentUserProfile?.name ?: "User") {
         val newPos = (currentPosMs + 15000L).coerceAtMost(if (durationMs > 0) durationMs else Long.MAX_VALUE)
         _playbackState.value = _playbackState.value.copy(
             positionMs = newPos,
@@ -526,7 +540,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendSkipBackward(currentPosMs: Long, senderName: String) {
+    fun sendSkipBackward(currentPosMs: Long, senderName: String = currentUserProfile?.name ?: "User") {
         val newPos = (currentPosMs - 15000L).coerceAtLeast(0L)
         _playbackState.value = _playbackState.value.copy(
             positionMs = newPos,
@@ -548,7 +562,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun changeVideo(newUrl: String, newTitle: String, senderName: String) {
+    fun changeVideo(newUrl: String, newTitle: String, senderName: String = currentUserProfile?.name ?: "User") {
         _playbackState.value = _playbackState.value.copy(
             videoUrl = newUrl,
             videoTitle = newTitle,
@@ -574,7 +588,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendChatMessage(text: String, senderName: String) {
+    fun sendChatMessage(text: String, senderName: String = currentUserProfile?.name ?: "User") {
         val user = currentUserProfile ?: return
         val msg = ChatMessage(
             senderId = user.id,
@@ -596,7 +610,7 @@ class RoomSyncManager private constructor() {
         )
     }
 
-    fun sendReaction(emoji: String, senderName: String) {
+    fun sendReaction(emoji: String, senderName: String = currentUserProfile?.name ?: "User") {
         val user = currentUserProfile ?: return
         val reaction = FloatingReaction(
             emoji = emoji,
@@ -620,6 +634,30 @@ class RoomSyncManager private constructor() {
     fun setSubtitlesEnabled(enabled: Boolean) {
         _playbackState.value = _playbackState.value.copy(
             subtitlesEnabled = enabled
+        )
+    }
+
+    fun toggleSubtitles(enabled: Boolean, senderName: String? = null) {
+        val name = senderName ?: currentUserProfile?.name ?: "User"
+        _playbackState.value = _playbackState.value.copy(
+            subtitlesEnabled = enabled
+        )
+        notifySync("$name ${if (enabled) "turned on" else "turned off"} subtitles", name, PlaybackAction.INITIAL_SYNC)
+
+        val user = currentUserProfile ?: return
+        networkClient.broadcast(
+            RealtimeMessage(
+                type = "SYNC_STATE",
+                roomId = _roomId.value,
+                senderId = user.id,
+                senderName = name,
+                videoUrl = _playbackState.value.videoUrl,
+                videoTitle = _playbackState.value.videoTitle,
+                isPlaying = _playbackState.value.isPlaying,
+                positionMs = _playbackState.value.positionMs,
+                durationMs = _playbackState.value.durationMs,
+                subtitlesEnabled = enabled
+            )
         )
     }
 

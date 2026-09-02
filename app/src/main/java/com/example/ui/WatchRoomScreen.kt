@@ -876,7 +876,7 @@ fun ChangeVideoSourceDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Paste a Google Drive sharing link, Dropbox link, or direct video URL:",
+                    text = "Paste a YouTube URL (e.g. youtube.com or youtu.be), Google Drive link, Dropbox, or MP4/HLS stream:",
                     style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
                 )
 
@@ -888,7 +888,7 @@ fun ChangeVideoSourceDialog(
                         urlInput = it
                         error = null
                     },
-                    placeholder = { Text("https://drive.google.com/... or https://.../video.mp4") },
+                    placeholder = { Text("https://youtube.com/watch?v=... or Drive link") },
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AccentGold,

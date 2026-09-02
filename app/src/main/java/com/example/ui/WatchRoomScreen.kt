@@ -134,6 +134,7 @@ fun WatchRoomScreen(
     val isMicrophoneEnabled by syncManager.isMicrophoneEnabled.collectAsStateWithLifecycle()
     val connectionState by syncManager.connectionState.collectAsStateWithLifecycle()
     val chatMessages by syncManager.chatMessages.collectAsStateWithLifecycle()
+    val peerVideoFrames by syncManager.peerVideoFrames.collectAsStateWithLifecycle()
 
     var showChangeVideoDialog by remember { mutableStateOf(false) }
     var showInviteSheet by remember { mutableStateOf(false) }
@@ -497,7 +498,11 @@ fun WatchRoomScreen(
                 participants = participants,
                 currentUserId = currentUser.id,
                 isCameraEnabled = isCameraEnabled,
-                isMicrophoneEnabled = isMicrophoneEnabled
+                isMicrophoneEnabled = isMicrophoneEnabled,
+                peerVideoFrames = peerVideoFrames,
+                onFrameCaptured = { jpegBytes ->
+                    syncManager.broadcastCameraFrame(jpegBytes)
+                }
             )
         }
 

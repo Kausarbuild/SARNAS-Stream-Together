@@ -189,19 +189,15 @@ fun YouTubeSyncPlayer(
         lastSyncedActionTime = playbackState.updatedAt
 
         if (playbackState.isPlaying) {
-            if (isExplicitAction) {
-                val elapsed = (System.currentTimeMillis() - playbackState.updatedAt) / 1000.0
-                val adjustedSeconds = targetSeconds + elapsed.coerceAtLeast(0.0)
+            val elapsed = if (playbackState.updatedAt > 0) (System.currentTimeMillis() - playbackState.updatedAt) / 1000.0 else 0.0
+            val adjustedSeconds = (targetSeconds + elapsed).coerceAtLeast(0.0)
+            if (isExplicitAction || targetSeconds > 0.0) {
                 webView.evaluateJavascript("seek($adjustedSeconds); play();", null)
             } else {
                 webView.evaluateJavascript("play();", null)
             }
         } else {
-            if (isExplicitAction) {
-                webView.evaluateJavascript("seek($targetSeconds); pause();", null)
-            } else {
-                webView.evaluateJavascript("pause();", null)
-            }
+            webView.evaluateJavascript("seek($targetSeconds); pause();", null)
         }
     }
 

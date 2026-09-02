@@ -1,8 +1,10 @@
 package com.example.camera
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -14,6 +16,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -42,6 +45,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -51,22 +56,31 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.example.data.RoomParticipant
+import java.io.ByteArrayOutputStream
 
+/**
+ * Real-time floating camera bubble:
+ * - When self & camera on: renders live front camera preview and captures frames to broadcast.
+ * - When peer & camera on: renders incoming live video feed from peer.
+ * - When camera off: renders avatar with camera-off indicator.
+ * - Displays live mic status and participant name tag.
+ */
 @Composable
 fun CameraBubble(
     participant: RoomParticipant,
     isSelf: Boolean,
     isCameraEnabled: Boolean,
     isMicrophoneEnabled: Boolean,
+    peerBitmap: Bitmap? = null,
+    onFrameCaptured: ((ByteArray) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
 
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1.0f,
-        targetValue = 1.08f,
+        targetValue = 1.06f,
         animationSpec = infiniteRepeatable(
             animation = tween(1200),
             repeatMode = RepeatMode.Reverse
@@ -91,9 +105,18 @@ fun CameraBubble(
         contentAlignment = Alignment.Center
     ) {
         if (showCamera && isSelf) {
-            // Live front camera preview
+            // Live front camera preview for local user with frame capture
             CameraPreview(
                 context = context,
+                onFrameCaptured = onFrameCaptured,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (showCamera && !isSelf && peerBitmap != null) {
+            // Live video stream from remote peer
+            Image(
+                bitmap = peerBitmap.asImageBitmap(),
+                contentDescription = participant.name,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
         } else if (!participant.avatarUri.isNullOrBlank()) {
@@ -132,14 +155,31 @@ fun CameraBubble(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.35f)),
+                    .background(Color.Black.copy(alpha = 0.40f)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.VideocamOff,
                     contentDescription = "Camera Off",
-                    tint = Color.White.copy(alpha = 0.7f),
-                    modifier = Modifier.size(20.dp)
+                    tint = Color.White.copy(alpha = 0.75f),
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+        } else if (!isSelf && peerBitmap == null) {
+            // Camera is on but first frame is buffering
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.25f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "LIVE",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFE5A93C)
+                    )
                 )
             }
         }
@@ -190,6 +230,7 @@ fun CameraBubble(
 @Composable
 fun CameraPreview(
     context: Context,
+    onFrameCaptured: ((ByteArray) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -208,6 +249,40 @@ fun CameraPreview(
                     }
                 }
 
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                    .build()
+
+                var lastCapture = 0L
+                imageAnalysis.setAnalyzer(executor) { imageProxy ->
+                    val now = System.currentTimeMillis()
+                    if (onFrameCaptured != null && (now - lastCapture > 1500L)) {
+                        lastCapture = now
+                        try {
+                            val plane = imageProxy.planes[0]
+                            val buffer = plane.buffer
+                            val width = imageProxy.width
+                            val height = imageProxy.height
+
+                            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                            bitmap.copyPixelsFromBuffer(buffer)
+
+                            val scaled = Bitmap.createScaledBitmap(bitmap, 120, 120, true)
+                            val stream = ByteArrayOutputStream()
+                            scaled.compress(Bitmap.CompressFormat.JPEG, 35, stream)
+                            val bytes = stream.toByteArray()
+                            onFrameCaptured(bytes)
+
+                            if (scaled != bitmap) scaled.recycle()
+                            bitmap.recycle()
+                        } catch (e: Exception) {
+                            // Ignored
+                        }
+                    }
+                    imageProxy.close()
+                }
+
                 val cameraSelector = if (cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
                     CameraSelector.DEFAULT_FRONT_CAMERA
                 } else {
@@ -218,7 +293,8 @@ fun CameraPreview(
                 cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     cameraSelector,
-                    preview
+                    preview,
+                    imageAnalysis
                 )
             } catch (exc: Exception) {
                 Log.e("CameraBubble", "Use case binding failed", exc)
@@ -253,6 +329,8 @@ fun ParticipantBubblesStack(
     currentUserId: String,
     isCameraEnabled: Boolean,
     isMicrophoneEnabled: Boolean,
+    peerVideoFrames: Map<String, Bitmap> = emptyMap(),
+    onFrameCaptured: ((ByteArray) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -267,17 +345,19 @@ fun ParticipantBubblesStack(
                 participant = self,
                 isSelf = true,
                 isCameraEnabled = isCameraEnabled,
-                isMicrophoneEnabled = isMicrophoneEnabled
+                isMicrophoneEnabled = isMicrophoneEnabled,
+                onFrameCaptured = onFrameCaptured
             )
         }
 
-        // Render other participants (up to 2 others cleanly)
-        participants.filter { it.id != currentUserId }.take(2).forEach { peer ->
+        // Render other participants (up to 3 others cleanly)
+        participants.filter { it.id != currentUserId }.take(3).forEach { peer ->
             CameraBubble(
                 participant = peer,
                 isSelf = false,
                 isCameraEnabled = peer.isCameraOn,
-                isMicrophoneEnabled = !peer.isMuted
+                isMicrophoneEnabled = !peer.isMuted,
+                peerBitmap = peerVideoFrames[peer.id]
             )
         }
     }

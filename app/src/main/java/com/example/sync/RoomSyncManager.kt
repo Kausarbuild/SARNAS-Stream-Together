@@ -1,5 +1,9 @@
 package com.example.sync
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.util.Base64
+import com.example.audio.VoiceChatManager
 import com.example.data.PlaybackAction
 import com.example.data.PlaybackState
 import com.example.data.RoomParticipant
@@ -59,10 +63,16 @@ class RoomSyncManager private constructor() {
     private val _isMicrophoneEnabled = MutableStateFlow(true)
     val isMicrophoneEnabled: StateFlow<Boolean> = _isMicrophoneEnabled.asStateFlow()
 
+    // Live remote participant camera frames decoded into Bitmaps
+    private val _peerVideoFrames = MutableStateFlow<Map<String, Bitmap>>(emptyMap())
+    val peerVideoFrames: StateFlow<Map<String, Bitmap>> = _peerVideoFrames.asStateFlow()
+
     private var currentUserProfile: UserProfile? = null
     private var isHostUser = false
     private var heartbeatJob: Job? = null
     private val participantLastSeen = ConcurrentHashMap<String, Long>()
+    private var voiceChatManager: VoiceChatManager? = null
+    private var lastAudioCloudSend = 0L
 
     // Realtime network client connected to shared topic
     private val networkClient = RealtimeRoomClient { incoming ->
@@ -90,6 +100,7 @@ class RoomSyncManager private constructor() {
         isHostUser = isHost
         participantLastSeen.clear()
         _chatMessages.value = emptyList()
+        _peerVideoFrames.value = emptyMap()
 
         val localParticipant = RoomParticipant(
             id = currentUser.id,
@@ -118,6 +129,9 @@ class RoomSyncManager private constructor() {
             _playbackState.value = PlaybackState()
         }
 
+        // Initialize real-time voice chat engine
+        initVoiceChat()
+
         // Connect to Realtime Network Bus
         networkClient.connect(cleanRoomId)
 
@@ -144,7 +158,7 @@ class RoomSyncManager private constructor() {
         heartbeatJob = scope.launch {
             // If joining existing room, request state sync from host
             if (!isHost) {
-                delay(400)
+                delay(300)
                 networkClient.broadcast(
                     RealtimeMessage(
                         type = "SYNC_REQUEST",
@@ -156,7 +170,7 @@ class RoomSyncManager private constructor() {
             }
 
             while (isActive) {
-                delay(3000)
+                delay(5000)
                 val user = currentUserProfile ?: break
 
                 // 1. Send our presence heartbeat
@@ -174,13 +188,13 @@ class RoomSyncManager private constructor() {
                     )
                 )
 
-                // 2. Prune disconnected participants (if no heartbeat for > 12 seconds)
+                // 2. Prune disconnected participants (if no heartbeat for > 30 seconds to prevent flickering)
                 val now = System.currentTimeMillis()
                 val activeList = _participants.value.filter { p ->
                     if (p.id == user.id) true
                     else {
                         val lastSeen = participantLastSeen[p.id] ?: 0L
-                        (now - lastSeen) < 12000L
+                        (now - lastSeen) < 30000L
                     }
                 }
                 if (activeList.size != _participants.value.size) {
@@ -188,6 +202,49 @@ class RoomSyncManager private constructor() {
                 }
             }
         }
+    }
+
+    private fun initVoiceChat() {
+        voiceChatManager?.release()
+        voiceChatManager = VoiceChatManager { audioBytes ->
+            sendAudioPacket(audioBytes)
+        }
+        if (_isMicrophoneEnabled.value) {
+            voiceChatManager?.startRecording()
+        }
+    }
+
+    private fun sendAudioPacket(bytes: ByteArray) {
+        val now = System.currentTimeMillis()
+        // Rate-limit cloud transmission to ~10 packets/s; local LAN UDP is already unthrottled in VoiceChatManager
+        if (now - lastAudioCloudSend > 100) {
+            lastAudioCloudSend = now
+            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            val user = currentUserProfile ?: return
+            networkClient.broadcast(
+                RealtimeMessage(
+                    type = "AUDIO_PACKET",
+                    roomId = _roomId.value,
+                    senderId = user.id,
+                    senderName = user.name,
+                    audioPacketBase64 = b64
+                )
+            )
+        }
+    }
+
+    fun broadcastCameraFrame(jpegBytes: ByteArray) {
+        val user = currentUserProfile ?: return
+        val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        networkClient.broadcast(
+            RealtimeMessage(
+                type = "VIDEO_FRAME",
+                roomId = _roomId.value,
+                senderId = user.id,
+                senderName = user.name,
+                videoFrameBase64 = b64
+            )
+        )
     }
 
     private fun handleIncomingMessage(msg: RealtimeMessage) {
@@ -211,7 +268,7 @@ class RoomSyncManager private constructor() {
                     addOrUpdateParticipant(newParticipant)
                     notifySync("${msg.senderName} is in the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
 
-                    // If we have an active video stream, reply with SYNC_STATE so the new user immediately sees it
+                    // If we have an active video stream, reply with SYNC_STATE so the new user immediately syncs
                     val curPlay = _playbackState.value
                     if (curPlay.videoUrl.isNotBlank()) {
                         networkClient.broadcast(
@@ -249,6 +306,32 @@ class RoomSyncManager private constructor() {
                         isMuted = msg.isMuted
                     )
                     addOrUpdateParticipant(peer)
+                }
+
+                "VIDEO_FRAME" -> {
+                    if (!msg.videoFrameBase64.isNullOrBlank()) {
+                        try {
+                            val bytes = Base64.decode(msg.videoFrameBase64, Base64.NO_WRAP)
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bitmap != null) {
+                                _peerVideoFrames.value = _peerVideoFrames.value + (msg.senderId to bitmap)
+                                updateParticipant(msg.senderId) { it.copy(isCameraOn = true) }
+                            }
+                        } catch (e: Exception) {
+                            // Ignored
+                        }
+                    }
+                }
+
+                "AUDIO_PACKET" -> {
+                    if (!msg.audioPacketBase64.isNullOrBlank()) {
+                        try {
+                            val bytes = Base64.decode(msg.audioPacketBase64, Base64.NO_WRAP)
+                            voiceChatManager?.playMuLawAudio(bytes)
+                        } catch (e: Exception) {
+                            // Ignored
+                        }
+                    }
                 }
 
                 "SYNC_REQUEST" -> {
@@ -364,6 +447,9 @@ class RoomSyncManager private constructor() {
                     updateParticipant(msg.senderId) {
                         it.copy(isCameraOn = msg.isCameraOn, isMuted = msg.isMuted)
                     }
+                    if (!msg.isCameraOn) {
+                        _peerVideoFrames.value = _peerVideoFrames.value - msg.senderId
+                    }
                 }
 
                 "CHAT" -> {
@@ -392,6 +478,7 @@ class RoomSyncManager private constructor() {
 
                 "LEAVE" -> {
                     removeParticipant(msg.senderId)
+                    _peerVideoFrames.value = _peerVideoFrames.value - msg.senderId
                     notifySync("${msg.senderName} left the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
                 }
             }
@@ -428,6 +515,11 @@ class RoomSyncManager private constructor() {
     fun setMicrophoneEnabled(enabled: Boolean, userId: String) {
         _isMicrophoneEnabled.value = enabled
         updateParticipant(userId) { it.copy(isMuted = !enabled) }
+        if (enabled) {
+            voiceChatManager?.startRecording()
+        } else {
+            voiceChatManager?.stopRecording()
+        }
         broadcastMediaStatus()
     }
 
@@ -460,7 +552,7 @@ class RoomSyncManager private constructor() {
             lastAction = PlaybackAction.PLAY,
             actionSenderName = senderName
         )
-        notifySync("$senderName started playing", senderName, PlaybackAction.PLAY)
+        notifySync("$senderName pressed Play", senderName, PlaybackAction.PLAY)
 
         val user = currentUserProfile ?: return
         networkClient.broadcast(
@@ -482,7 +574,7 @@ class RoomSyncManager private constructor() {
             lastAction = PlaybackAction.PAUSE,
             actionSenderName = senderName
         )
-        notifySync("$senderName paused the video", senderName, PlaybackAction.PAUSE)
+        notifySync("$senderName paused video", senderName, PlaybackAction.PAUSE)
 
         val user = currentUserProfile ?: return
         networkClient.broadcast(
@@ -702,8 +794,11 @@ class RoomSyncManager private constructor() {
         }
         heartbeatJob?.cancel()
         heartbeatJob = null
+        voiceChatManager?.release()
+        voiceChatManager = null
         networkClient.disconnect()
         participantLastSeen.clear()
+        _peerVideoFrames.value = emptyMap()
         _roomId.value = ""
         _roomTitle.value = "Watch Room"
         _participants.value = emptyList()

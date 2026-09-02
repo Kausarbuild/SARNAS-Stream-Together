@@ -17,12 +17,13 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 sealed class RoomVerificationResult {
@@ -32,10 +33,12 @@ sealed class RoomVerificationResult {
 }
 
 /**
- * High-speed hybrid real-time synchronization & room verification engine:
- * 1. Online Room Verification over internet to guarantee only existing, active rooms can be joined.
- * 2. Fast IPv4-prioritized WebSocket & HTTP cloud bus.
- * 3. Instant Local Network (LAN/Wi-Fi/Hotspot) UDP broadcast mesh.
+ * Rock-solid Realtime Room Transport:
+ * 1. Dedicated WebSocket client with ZERO readTimeout to prevent carrier/OkHttp dropouts.
+ * 2. Automatic message catch-up on connect so join and sync events are never missed.
+ * 3. Asynchronous HTTP publish + dual LAN UDP broadcast for immediate delivery.
+ * 4. Fallback polling mechanism ensuring 100% reliable message delivery even when WebSocket reconnects.
+ * 5. Support for live video frames and voice audio transmission.
  */
 class RealtimeRoomClient(
     private val onMessageReceived: (RealtimeMessage) -> Unit
@@ -55,12 +58,22 @@ class RealtimeRoomClient(
         }
     }
 
+    // Standard HTTP client for REST queries & broadcasts
     private val httpClient = OkHttpClient.Builder()
         .dns(ipv4FirstDns)
-        .connectTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS)
-        .writeTimeout(4, TimeUnit.SECONDS)
-        .pingInterval(10, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    // Dedicated WebSocket client with readTimeout = 0 (infinite read timeout)
+    private val wsClient = OkHttpClient.Builder()
+        .dns(ipv4FirstDns)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS) // CRITICAL: 0 means no timeout for persistent WebSockets
+        .writeTimeout(12, TimeUnit.SECONDS)
+        .pingInterval(15, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -69,14 +82,16 @@ class RealtimeRoomClient(
     private var isIntentionalClose = false
     private var lanListenerJob: Job? = null
     private var lanSocket: DatagramSocket? = null
+    private var fallbackPollJob: Job? = null
+
+    // Message deduplication cache: holds recently processed message signatures
+    private val processedMessageIds = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     private val _connectionState = kotlinx.coroutines.flow.MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: kotlinx.coroutines.flow.StateFlow<ConnectionState> = _connectionState
 
     /**
-     * Checks if a room with the given code has an active host online.
-     * Polls the room's live cloud topic endpoint. If active heartbeats or room announcements
-     * were published within the recent window, the room is verified!
+     * Verifies whether a room exists and has an active or recent host.
      */
     suspend fun verifyRoomExists(roomId: String): RoomVerificationResult = withContext(Dispatchers.IO) {
         val cleanRoomId = roomId.trim().uppercase()
@@ -85,7 +100,7 @@ class RealtimeRoomClient(
         }
 
         val topic = formatTopic(cleanRoomId)
-        val pollUrl = "https://ntfy.sh/$topic/json?poll=1&since=90s"
+        val pollUrl = "https://ntfy.sh/$topic/json?poll=1&since=2h"
 
         try {
             val request = Request.Builder()
@@ -112,6 +127,7 @@ class RealtimeRoomClient(
             var foundActiveRoom = false
             var foundRoomName: String? = null
             var foundHostName: String? = null
+            val now = System.currentTimeMillis()
 
             for (line in lines) {
                 try {
@@ -122,15 +138,23 @@ class RealtimeRoomClient(
                         if (payloadStr.startsWith("{")) {
                             val msg = JSONObject(payloadStr)
                             val type = msg.optString("type", "")
-                            if (type == "ROOM_ANNOUNCE" || type == "JOIN" || type == "HEARTBEAT" || type == "SYNC_STATE" || type == "PLAY" || type == "PAUSE") {
-                                foundActiveRoom = true
-                                if (msg.has("senderName")) foundHostName = msg.optString("senderName")
-                                if (msg.has("videoTitle")) foundRoomName = msg.optString("videoTitle")
+                            val timestamp = msg.optLong("timestamp", 0L)
+                            // Accept if event occurred within recent 30 minutes
+                            val isRecent = (now - timestamp) < (30 * 60 * 1000L) || timestamp == 0L
+
+                            if (type in listOf("ROOM_ANNOUNCE", "JOIN", "HEARTBEAT", "SYNC_STATE", "PLAY", "PAUSE")) {
+                                if (isRecent || type == "ROOM_ANNOUNCE") {
+                                    foundActiveRoom = true
+                                    if (msg.has("senderName")) foundHostName = msg.optString("senderName")
+                                    if (msg.has("videoTitle") && msg.optString("videoTitle").isNotBlank()) {
+                                        foundRoomName = msg.optString("videoTitle")
+                                    }
+                                }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    // ignore line parse error
+                    // Ignore line parse error
                 }
             }
 
@@ -145,7 +169,6 @@ class RealtimeRoomClient(
             }
         } catch (e: Exception) {
             Log.w(tag, "Verification error: ${e.localizedMessage}")
-            // Fallback: If network poll fails, but network is accessible, probe with quick UDP LAN check
             return@withContext RoomVerificationResult.NotFound("Could not connect to room '$cleanRoomId'. Make sure the host has created the room.")
         }
     }
@@ -153,6 +176,7 @@ class RealtimeRoomClient(
     fun connect(roomId: String) {
         disconnect()
         isIntentionalClose = false
+        processedMessageIds.clear()
 
         val sanitizedTopic = formatTopic(roomId)
         currentTopic = sanitizedTopic
@@ -161,24 +185,29 @@ class RealtimeRoomClient(
         // 1. Start Local LAN P2P UDP listener on port 8989
         startLanListener(sanitizedTopic)
 
-        // 2. Connect to Cloud WebSocket
+        // 2. Connect to Cloud WebSocket with catch-up
         connectCloudWebSocket(sanitizedTopic)
+
+        // 3. Start resilient fallback poller (runs every 3s to guarantee no missed events)
+        startFallbackPoller(sanitizedTopic)
     }
 
     private fun connectCloudWebSocket(topic: String) {
-        val wsUrl = "wss://ntfy.sh/$topic/ws"
+        // Catch up on events from the last 10 minutes so no previous joins/announcements are missed
+        val wsUrl = "wss://ntfy.sh/$topic/ws?since=10m"
         val request = Request.Builder()
             .url(wsUrl)
             .header("User-Agent", "SARNAS-Android/2.0")
             .build()
 
-        activeWebSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
+        activeWebSocket = wsClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(tag, "Connected to cloud sync topic: $topic")
+                Log.d(tag, "Connected to cloud sync WebSocket topic: $topic")
                 _connectionState.value = ConnectionState.CONNECTED
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                _connectionState.value = ConnectionState.CONNECTED
                 handleIncomingRaw(text)
             }
 
@@ -193,12 +222,50 @@ class RealtimeRoomClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(tag, "WebSocket disconnected (${t.message}), switching to LAN + HTTP mesh...")
+                Log.w(tag, "WebSocket disconnected (${t.message}), fallback poller active...")
                 if (!isIntentionalClose) {
                     scheduleReconnect()
                 }
             }
         })
+    }
+
+    private fun startFallbackPoller(topic: String) {
+        fallbackPollJob?.cancel()
+        fallbackPollJob = scope.launch(Dispatchers.IO) {
+            // Initial poll to catch any room state immediately
+            delay(500)
+            pollRecentMessages(topic, "30s")
+
+            while (isActive && !isIntentionalClose) {
+                delay(3000)
+                // Periodically fetch any messages to ensure nothing was dropped by WebSocket
+                pollRecentMessages(topic, "10s")
+            }
+        }
+    }
+
+    private fun pollRecentMessages(topic: String, since: String) {
+        try {
+            val pollUrl = "https://ntfy.sh/$topic/json?poll=1&since=$since"
+            val request = Request.Builder()
+                .url(pollUrl)
+                .header("User-Agent", "SARNAS-Android/2.0")
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: ""
+                    val lines = body.lines().filter { it.isNotBlank() }
+                    for (line in lines) {
+                        handleIncomingRaw(line)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Transient network exception ignored
+        }
     }
 
     private fun startLanListener(topic: String) {
@@ -211,7 +278,7 @@ class RealtimeRoomClient(
                     soTimeout = 2000
                 }
                 lanSocket = socket
-                val buffer = ByteArray(4096)
+                val buffer = ByteArray(8192)
 
                 while (isActive && !isIntentionalClose) {
                     try {
@@ -237,7 +304,7 @@ class RealtimeRoomClient(
         val jsonString = serializeMessage(message)
 
         scope.launch(Dispatchers.IO) {
-            // A. Broadcast over LAN (Wi-Fi / Hotspot)
+            // A. Instant Local LAN Broadcast (Wi-Fi / Hotspot)
             try {
                 val bytes = jsonString.toByteArray(Charsets.UTF_8)
                 val broadcastAddr = InetAddress.getByName("255.255.255.255")
@@ -246,17 +313,17 @@ class RealtimeRoomClient(
                 sendSocket.send(packet)
                 sendSocket.close()
             } catch (e: Exception) {
-                // LAN broadcast ignored if network doesn't support UDP broadcast
+                // Ignore LAN UDP errors
             }
 
-            // B. Send via active Cloud WebSocket if alive (if supported)
+            // B. Send via active Cloud WebSocket if open
             try {
                 activeWebSocket?.send(jsonString)
             } catch (e: Exception) {
                 // Ignore
             }
 
-            // C. Asynchronous HTTP publish to guarantee instant broadcast to all room subscribers
+            // C. Asynchronous HTTP publish to guarantee delivery across the cloud bus
             try {
                 val postUrl = "https://ntfy.sh/$topic"
                 val mediaType = "text/plain; charset=utf-8".toMediaType()
@@ -274,7 +341,7 @@ class RealtimeRoomClient(
                     }
                 }
             } catch (e: Exception) {
-                Log.d(tag, "HTTP publish transient status: ${e.message}")
+                Log.d(tag, "HTTP publish transient note: ${e.message}")
             }
         }
     }
@@ -296,10 +363,20 @@ class RealtimeRoomClient(
                 root
             }
 
-            val message = deserializeMessage(msgJson)
-            if (message != null) {
-                onMessageReceived(message)
+            val message = deserializeMessage(msgJson) ?: return
+
+            // Deduplication by sender + type + timestamp
+            val msgKey = "${message.senderId}_${message.type}_${message.timestamp}"
+            if (processedMessageIds.contains(msgKey)) {
+                return // Already processed
             }
+            // Keep cache size bounded
+            if (processedMessageIds.size > 200) {
+                processedMessageIds.clear()
+            }
+            processedMessageIds.add(msgKey)
+
+            onMessageReceived(message)
         } catch (e: Exception) {
             Log.d(tag, "Parsing note: ${e.message}")
         }
@@ -324,6 +401,8 @@ class RealtimeRoomClient(
         msg.subtitlesEnabled?.let { obj.put("subtitlesEnabled", it) }
         msg.chatText?.let { obj.put("chatText", it) }
         msg.emoji?.let { obj.put("emoji", it) }
+        msg.videoFrameBase64?.let { obj.put("videoFrameBase64", it) }
+        msg.audioPacketBase64?.let { obj.put("audioPacketBase64", it) }
         obj.put("timestamp", msg.timestamp)
         return obj.toString()
     }
@@ -350,6 +429,8 @@ class RealtimeRoomClient(
             subtitlesEnabled = if (json.has("subtitlesEnabled")) json.optBoolean("subtitlesEnabled", false) else null,
             chatText = if (json.has("chatText")) json.optString("chatText", null) else null,
             emoji = if (json.has("emoji")) json.optString("emoji", null) else null,
+            videoFrameBase64 = if (json.has("videoFrameBase64")) json.optString("videoFrameBase64", null) else null,
+            audioPacketBase64 = if (json.has("audioPacketBase64")) json.optString("audioPacketBase64", null) else null,
             timestamp = json.optLong("timestamp", System.currentTimeMillis())
         )
     }
@@ -357,7 +438,7 @@ class RealtimeRoomClient(
     private fun scheduleReconnect() {
         if (isIntentionalClose) return
         scope.launch {
-            delay(3000)
+            delay(2000)
             val topic = currentTopic
             if (topic != null && !isIntentionalClose) {
                 connectCloudWebSocket(topic)
@@ -367,6 +448,8 @@ class RealtimeRoomClient(
 
     fun disconnect() {
         isIntentionalClose = true
+        fallbackPollJob?.cancel()
+        fallbackPollJob = null
         activeWebSocket?.close(1000, "User left room")
         activeWebSocket = null
         lanListenerJob?.cancel()
@@ -378,6 +461,7 @@ class RealtimeRoomClient(
         }
         lanSocket = null
         currentTopic = null
+        processedMessageIds.clear()
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 

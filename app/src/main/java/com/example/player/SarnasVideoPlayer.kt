@@ -275,6 +275,14 @@ fun SarnasVideoPlayer(
                             durationMs = dur
                             syncManager.updateDuration(dur)
                         }
+                        if (exoPlayer.playWhenReady != playbackState.isPlaying) {
+                            exoPlayer.playWhenReady = playbackState.isPlaying
+                        }
+                        val elapsed = if (playbackState.isPlaying) System.currentTimeMillis() - playbackState.updatedAt else 0L
+                        val expectedPos = (playbackState.positionMs + elapsed).coerceAtLeast(0L)
+                        if (expectedPos > 0L && kotlin.math.abs(exoPlayer.currentPosition - expectedPos) > 1200L) {
+                            exoPlayer.seekTo(expectedPos)
+                        }
                     }
                     Player.STATE_ENDED -> {
                         isBuffering = false

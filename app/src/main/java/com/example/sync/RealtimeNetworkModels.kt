@@ -45,5 +45,7 @@ data class RealtimeMessage(
     val subtitlesEnabled: Boolean? = null,
     val chatText: String? = null,
     val emoji: String? = null,
+    val videoFrameBase64: String? = null,
+    val audioPacketBase64: String? = null,
     val timestamp: Long = System.currentTimeMillis()
 )

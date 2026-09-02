@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Ambient glow circle -->
+    <path
+        android:pathData="M54,54m-28,0a28,28 0,1,1 56,0a28,28 0,1,1 -56,0"
+        android:fillColor="#15E5A93C" />
+    <!-- Outer sync ring -->
+    <path
+        android:pathData="M32,42 C36,34 44,30 54,30 C64,30 72,34 76,42 M76,66 C72,74 64,78 54,78 C44,78 36,74 32,66"
+        android:strokeWidth="3.2"
+        android:strokeColor="#E5A93C"
+        android:strokeLineCap="round" />
+    <!-- Dynamic Synchronized Play Emblem -->
+    <path
+        android:pathData="M46,38 L68,54 L46,70 Z"
+        android:fillColor="#FFFFFF" />
+    <path
+        android:pathData="M43,44 L57,54 L43,64 Z"
+        android:fillColor="#E5A93C" />
+</vector>

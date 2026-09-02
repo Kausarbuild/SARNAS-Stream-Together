@@ -682,7 +682,9 @@ fun JoinRoomDialog(
                         if (raw.isBlank()) {
                             error = "Please enter a room code"
                         } else {
-                            val code = if (raw.contains("room=")) {
+                            val code = if (raw.contains("/room/")) {
+                                raw.substringAfter("/room/").substringBefore("?").substringBefore("/")
+                            } else if (raw.contains("room=")) {
                                 raw.substringAfter("room=").substringBefore("&")
                             } else {
                                 raw

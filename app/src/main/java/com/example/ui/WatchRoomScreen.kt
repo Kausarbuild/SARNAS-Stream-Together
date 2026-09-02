@@ -616,20 +616,12 @@ fun WatchRoomScreen(
         )
     }
 
-    // Room Participants & Sync Test Sheet
+    // Room Participants Sheet
     if (showParticipantsSheet) {
         RoomParticipantsSheet(
             participants = participants,
             currentUserId = currentUser.id,
-            onSimulatePeerAction = { peerName, action ->
-                val curPos = playbackState.positionMs
-                when (action) {
-                    PlaybackAction.PLAY -> syncManager.sendPlay(curPos, peerName)
-                    PlaybackAction.PAUSE -> syncManager.sendPause(curPos, peerName)
-                    PlaybackAction.SKIP_FORWARD -> syncManager.sendSkipForward(curPos, playbackState.durationMs, peerName)
-                    else -> Unit
-                }
-            },
+            roomId = roomId,
             onDismiss = { showParticipantsSheet = false }
         )
     }
@@ -1170,9 +1162,10 @@ fun InRoomInviteSheet(
 fun RoomParticipantsSheet(
     participants: List<RoomParticipant>,
     currentUserId: String,
-    onSimulatePeerAction: (peerName: String, action: PlaybackAction) -> Unit,
+    roomId: String,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(
@@ -1193,13 +1186,19 @@ fun RoomParticipantsSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Room Participants (${participants.size})",
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
+                Column {
+                    Text(
+                        text = "Room Participants (${participants.size})",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
                     )
-                )
+                    Text(
+                        text = "Room ID: $roomId",
+                        style = MaterialTheme.typography.labelSmall.copy(color = AccentGold)
+                    )
+                }
                 IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                 }
@@ -1247,8 +1246,8 @@ fun RoomParticipantsSheet(
                                     )
                                 )
                                 Text(
-                                    text = if (p.isHost) "Host • In sync" else "Participant • In sync",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = TextSecondary)
+                                    text = if (p.isHost) "Host • Realtime Connected" else "Participant • Realtime Connected",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF2AC28A))
                                 )
                             }
 
@@ -1271,45 +1270,21 @@ fun RoomParticipantsSheet(
                 }
             }
 
-            // Sync Verification Controls for connected peers
-            val otherParticipants = participants.filter { it.id != currentUserId }
-            if (otherParticipants.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(20.dp))
-                Text(
-                    text = "Test Remote Synchronization:",
-                    style = MaterialTheme.typography.labelSmall.copy(color = TextTertiary)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val peer = otherParticipants.first()
-                    Button(
-                        onClick = { onSimulatePeerAction(peer.name, PlaybackAction.PAUSE) },
-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant, contentColor = TextPrimary),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.weight(1f).height(38.dp)
-                    ) {
-                        Text("Peer Pause", style = MaterialTheme.typography.labelSmall)
+            Spacer(modifier = Modifier.height(20.dp))
+            Button(
+                onClick = {
+                    val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, "Join my Sarnas Watch Room")
+                        putExtra(android.content.Intent.EXTRA_TEXT, "Join my Sarnas Watch Room! Use Room Code: $roomId or link: https://sarnas.stream/room/$roomId")
                     }
-                    Button(
-                        onClick = { onSimulatePeerAction(peer.name, PlaybackAction.PLAY) },
-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant, contentColor = TextPrimary),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.weight(1f).height(38.dp)
-                    ) {
-                        Text("Peer Play", style = MaterialTheme.typography.labelSmall)
-                    }
-                    Button(
-                        onClick = { onSimulatePeerAction(peer.name, PlaybackAction.SKIP_FORWARD) },
-                        colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant, contentColor = TextPrimary),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.weight(1f).height(38.dp)
-                    ) {
-                        Text("Peer +15s", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
+                    context.startActivity(android.content.Intent.createChooser(shareIntent, "Share Room Invitation"))
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = AccentGold, contentColor = Color.Black),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.fillMaxWidth().height(46.dp)
+            ) {
+                Text("Share Room Invitation", fontWeight = FontWeight.Bold)
             }
         }
     }

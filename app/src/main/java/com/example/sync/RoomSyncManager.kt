@@ -156,21 +156,34 @@ class RoomSyncManager private constructor() {
         // Start Periodic Heartbeat and Presence Pruning loop
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
-            // If joining existing room, request state sync from host
+            // If joining existing room, request state sync from host with retries
             if (!isHost) {
-                delay(300)
-                networkClient.broadcast(
-                    RealtimeMessage(
-                        type = "SYNC_REQUEST",
-                        roomId = cleanRoomId,
-                        senderId = currentUser.id,
-                        senderName = currentUser.name
-                    )
-                )
+                launch {
+                    val retryDelays = listOf(200L, 700L, 1600L, 3000L)
+                    for (d in retryDelays) {
+                        delay(d)
+                        if (!isActive) break
+                        if (_playbackState.value.videoUrl.isBlank()) {
+                            networkClient.broadcast(
+                                RealtimeMessage(
+                                    type = "SYNC_REQUEST",
+                                    roomId = cleanRoomId,
+                                    senderId = currentUser.id,
+                                    senderName = currentUser.name,
+                                    avatarUri = currentUser.avatarUri,
+                                    avatarColorHex = currentUser.avatarColorHex,
+                                    isHost = false,
+                                    isCameraOn = _isCameraEnabled.value,
+                                    isMuted = !_isMicrophoneEnabled.value
+                                )
+                            )
+                        }
+                    }
+                }
             }
 
             while (isActive) {
-                delay(5000)
+                delay(4000)
                 val user = currentUserProfile ?: break
 
                 // 1. Send our presence heartbeat
@@ -188,13 +201,13 @@ class RoomSyncManager private constructor() {
                     )
                 )
 
-                // 2. Prune disconnected participants (if no heartbeat for > 30 seconds to prevent flickering)
+                // 2. Prune disconnected participants (if no heartbeat for > 45 seconds to prevent false disconnects)
                 val now = System.currentTimeMillis()
                 val activeList = _participants.value.filter { p ->
                     if (p.id == user.id) true
                     else {
                         val lastSeen = participantLastSeen[p.id] ?: 0L
-                        (now - lastSeen) < 30000L
+                        (now - lastSeen) < 45000L
                     }
                 }
                 if (activeList.size != _participants.value.size) {
@@ -268,7 +281,25 @@ class RoomSyncManager private constructor() {
                     addOrUpdateParticipant(newParticipant)
                     notifySync("${msg.senderName} is in the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
 
-                    // If we have an active video stream, reply with SYNC_STATE so the new user immediately syncs
+                    // If we are already in the room, immediately announce ourselves back to the new participant
+                    val myProfile = currentUserProfile
+                    if (myProfile != null) {
+                        networkClient.broadcast(
+                            RealtimeMessage(
+                                type = "HEARTBEAT",
+                                roomId = _roomId.value,
+                                senderId = myId,
+                                senderName = myProfile.name,
+                                avatarUri = myProfile.avatarUri,
+                                avatarColorHex = myProfile.avatarColorHex,
+                                isHost = isHostUser,
+                                isCameraOn = _isCameraEnabled.value,
+                                isMuted = !_isMicrophoneEnabled.value
+                            )
+                        )
+                    }
+
+                    // If we have an active video stream or are host, reply with SYNC_STATE so the new user immediately syncs
                     val curPlay = _playbackState.value
                     if (curPlay.videoUrl.isNotBlank()) {
                         networkClient.broadcast(
@@ -277,6 +308,11 @@ class RoomSyncManager private constructor() {
                                 roomId = _roomId.value,
                                 senderId = myId,
                                 senderName = currentUserProfile?.name ?: "Host",
+                                avatarUri = currentUserProfile?.avatarUri,
+                                avatarColorHex = currentUserProfile?.avatarColorHex,
+                                isHost = isHostUser,
+                                isCameraOn = _isCameraEnabled.value,
+                                isMuted = !_isMicrophoneEnabled.value,
                                 videoUrl = curPlay.videoUrl,
                                 videoTitle = curPlay.videoTitle,
                                 isPlaying = curPlay.isPlaying,
@@ -355,6 +391,17 @@ class RoomSyncManager private constructor() {
                 }
 
                 "SYNC_STATE" -> {
+                    val peer = RoomParticipant(
+                        id = msg.senderId,
+                        name = msg.senderName,
+                        avatarUri = msg.avatarUri,
+                        avatarColorHex = msg.avatarColorHex ?: "#E5A93C",
+                        isHost = msg.isHost,
+                        isCameraOn = msg.isCameraOn,
+                        isMuted = msg.isMuted
+                    )
+                    addOrUpdateParticipant(peer)
+
                     if (msg.videoUrl != null && msg.videoUrl.isNotBlank()) {
                         val current = _playbackState.value
                         _playbackState.value = current.copy(

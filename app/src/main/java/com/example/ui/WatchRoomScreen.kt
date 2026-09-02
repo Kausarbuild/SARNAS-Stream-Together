@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -66,6 +67,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,7 +80,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.ThumbUp
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.ui.graphics.graphicsLayer
 import com.example.camera.ParticipantBubblesStack
 import com.example.data.Friend
 import com.example.data.PlaybackAction
@@ -86,6 +100,9 @@ import com.example.data.RoomParticipant
 import com.example.data.UserProfile
 import com.example.player.SarnasVideoPlayer
 import com.example.player.VideoUrlResolver
+import com.example.sync.ChatMessage
+import com.example.sync.ConnectionState
+import com.example.sync.FloatingReaction
 import com.example.sync.RoomSyncManager
 import com.example.sync.SyncNotification
 import com.example.ui.theme.AccentCyan
@@ -115,12 +132,23 @@ fun WatchRoomScreen(
     val playbackState by syncManager.playbackState.collectAsStateWithLifecycle()
     val isCameraEnabled by syncManager.isCameraEnabled.collectAsStateWithLifecycle()
     val isMicrophoneEnabled by syncManager.isMicrophoneEnabled.collectAsStateWithLifecycle()
+    val connectionState by syncManager.connectionState.collectAsStateWithLifecycle()
+    val chatMessages by syncManager.chatMessages.collectAsStateWithLifecycle()
 
     var showChangeVideoDialog by remember { mutableStateOf(false) }
     var showInviteSheet by remember { mutableStateOf(false) }
     var showParticipantsSheet by remember { mutableStateOf(false) }
+    var showChatSheet by remember { mutableStateOf(false) }
     var activeSyncBanner by remember { mutableStateOf<SyncNotification?>(null) }
     var isFullscreenActive by remember { mutableStateOf(false) }
+    var reactionsList by remember { mutableStateOf<List<FloatingReaction>>(emptyList()) }
+
+    // Collect Real-time reactions
+    LaunchedEffect(Unit) {
+        syncManager.activeReactions.collect { reaction ->
+            reactionsList = reactionsList + reaction
+        }
+    }
 
     // Listen for real-time synchronization notification toasts
     LaunchedEffect(Unit) {
@@ -220,7 +248,7 @@ fun WatchRoomScreen(
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Paste a Google Drive link or video URL to start streaming together",
+                        text = "Paste a Google Drive link or video URL to start streaming together in real-time",
                         style = MaterialTheme.typography.bodySmall.copy(
                             color = TextSecondary,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -244,6 +272,22 @@ fun WatchRoomScreen(
             }
         }
 
+        // Floating Animated Emojis / Reactions Layer
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 90.dp)
+        ) {
+            reactionsList.takeLast(10).forEach { reaction ->
+                FloatingReactionItem(
+                    reaction = reaction,
+                    onFinished = {
+                        reactionsList = reactionsList.filter { it.id != reaction.id }
+                    }
+                )
+            }
+        }
+
         // Top Minimalist Room Bar (Overlay)
         if (!isFullscreenActive) {
             Row(
@@ -256,7 +300,7 @@ fun WatchRoomScreen(
             ) {
                 // Back & Room Info Pill
                 Surface(
-                    color = DarkSurface.copy(alpha = 0.85f),
+                    color = DarkSurface.copy(alpha = 0.88f),
                     shape = RoundedCornerShape(20.dp),
                     border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
                 ) {
@@ -282,19 +326,35 @@ fun WatchRoomScreen(
                         Spacer(modifier = Modifier.width(4.dp))
 
                         Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = roomTitle,
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary,
+                                        fontSize = 13.sp
+                                    ),
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                // Connection status indicator
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .background(
+                                            color = when (connectionState) {
+                                                ConnectionState.CONNECTED -> Color(0xFF2AC28A)
+                                                ConnectionState.CONNECTING -> Color(0xFFFFB300)
+                                                else -> Color(0xFFE53935)
+                                            },
+                                            shape = CircleShape
+                                        )
+                                )
+                            }
                             Text(
-                                text = roomTitle,
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary,
-                                    fontSize = 13.sp
-                                ),
-                                maxLines = 1
-                            )
-                            Text(
-                                text = "Code: $roomId",
+                                text = "Code: $roomId • ${if (connectionState == ConnectionState.CONNECTED) "Live Synced" else "Connecting..."}",
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    color = AccentGold,
+                                    color = if (connectionState == ConnectionState.CONNECTED) AccentGold else TextTertiary,
                                     fontSize = 10.sp
                                 )
                             )
@@ -303,14 +363,31 @@ fun WatchRoomScreen(
                     }
                 }
 
-                // Top Actions: Link Video, Invite, Participants
+                // Top Actions: Link Video, Invite, Chat, Participants
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Live Chat Button
+                    IconButton(
+                        onClick = { showChatSheet = true },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(DarkSurface.copy(alpha = 0.88f), CircleShape)
+                            .border(1.dp, DarkBorder, CircleShape)
+                            .testTag("open_chat_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Chat,
+                            contentDescription = "Live Chat",
+                            tint = AccentGold,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
                     // Change / Add Video Link
                     IconButton(
                         onClick = { showChangeVideoDialog = true },
                         modifier = Modifier
                             .size(38.dp)
-                            .background(DarkSurface.copy(alpha = 0.85f), CircleShape)
+                            .background(DarkSurface.copy(alpha = 0.88f), CircleShape)
                             .border(1.dp, DarkBorder, CircleShape)
                             .testTag("change_video_button")
                     ) {
@@ -327,7 +404,7 @@ fun WatchRoomScreen(
                         onClick = { showInviteSheet = true },
                         modifier = Modifier
                             .size(38.dp)
-                            .background(DarkSurface.copy(alpha = 0.85f), CircleShape)
+                            .background(DarkSurface.copy(alpha = 0.88f), CircleShape)
                             .border(1.dp, DarkBorder, CircleShape)
                             .testTag("invite_to_room_button")
                     ) {
@@ -341,7 +418,7 @@ fun WatchRoomScreen(
 
                     // Participants Pill
                     Surface(
-                        color = DarkSurface.copy(alpha = 0.85f),
+                        color = DarkSurface.copy(alpha = 0.88f),
                         shape = RoundedCornerShape(20.dp),
                         border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
                         modifier = Modifier.clickable { showParticipantsSheet = true }.testTag("participants_badge")
@@ -424,13 +501,14 @@ fun WatchRoomScreen(
             )
         }
 
-        // Floating Camera & Mic controls at bottom-left corner
+        // Floating Controls: Mic, Camera & Quick Emoji Reactions Bar at bottom-left corner
         if (!isFullscreenActive) {
             Row(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(bottom = 76.dp, start = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 // Mic toggle
                 IconButton(
@@ -465,6 +543,31 @@ fun WatchRoomScreen(
                         modifier = Modifier.size(20.dp)
                     )
                 }
+
+                // Quick Reaction Bar
+                Surface(
+                    color = DarkSurface.copy(alpha = 0.85f),
+                    shape = RoundedCornerShape(20.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        listOf("❤️", "🔥", "😂", "👏", "🎉", "🍿").forEach { emoji ->
+                            Text(
+                                text = emoji,
+                                fontSize = 18.sp,
+                                modifier = Modifier
+                                    .clickable {
+                                        syncManager.sendReaction(emoji, currentUser.name)
+                                    }
+                                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -481,6 +584,18 @@ fun WatchRoomScreen(
         )
     }
 
+    // In-Room Live Chat Bottom Sheet
+    if (showChatSheet) {
+        InRoomChatSheet(
+            messages = chatMessages,
+            currentUserId = currentUser.id,
+            onSendMessage = { text ->
+                syncManager.sendChatMessage(text, currentUser.name)
+            },
+            onDismiss = { showChatSheet = false }
+        )
+    }
+
     // In-Room Invite Bottom Sheet
     if (showInviteSheet) {
         InRoomInviteSheet(
@@ -488,18 +603,8 @@ fun WatchRoomScreen(
             friends = friends,
             currentParticipants = participants,
             onInviteFriend = { friend ->
-                // Add friend to room participants
-                val newPeer = RoomParticipant(
-                    id = friend.id,
-                    name = friend.name,
-                    avatarUri = friend.avatarUri,
-                    avatarColorHex = friend.avatarColorHex,
-                    isHost = false,
-                    isCameraOn = true,
-                    isMuted = false
-                )
-                syncManager.addParticipant(newPeer)
-                Toast.makeText(context, "${friend.name} joined the room", Toast.LENGTH_SHORT).show()
+                // Share/Invite
+                Toast.makeText(context, "Inviting ${friend.name} with room code $roomId", Toast.LENGTH_SHORT).show()
                 showInviteSheet = false
             },
             onDismiss = { showInviteSheet = false }
@@ -513,11 +618,218 @@ fun WatchRoomScreen(
             currentUserId = currentUser.id,
             onSimulatePeerAction = { peerName, action ->
                 val curPos = playbackState.positionMs
-                val dur = playbackState.durationMs
-                syncManager.triggerPeerSyncAction(peerName, action, curPos, dur)
+                when (action) {
+                    PlaybackAction.PLAY -> syncManager.sendPlay(curPos, peerName)
+                    PlaybackAction.PAUSE -> syncManager.sendPause(curPos, peerName)
+                    PlaybackAction.SKIP_FORWARD -> syncManager.sendSkipForward(curPos, playbackState.durationMs, peerName)
+                    else -> Unit
+                }
             },
             onDismiss = { showParticipantsSheet = false }
         )
+    }
+}
+
+@Composable
+fun FloatingReactionItem(
+    reaction: FloatingReaction,
+    onFinished: () -> Unit
+) {
+    val offsetY = remember { Animatable(0f) }
+    val alpha = remember { Animatable(1f) }
+
+    LaunchedEffect(reaction.id) {
+        launch {
+            offsetY.animateTo(
+                targetValue = -350f,
+                animationSpec = tween(durationMillis = 2400, easing = LinearEasing)
+            )
+        }
+        launch {
+            delay(1600)
+            alpha.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(durationMillis = 800)
+            )
+            onFinished()
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp)
+    ) {
+        Text(
+            text = reaction.emoji,
+            fontSize = 32.sp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .graphicsLayer {
+                    translationY = offsetY.value
+                    this.alpha = alpha.value
+                }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun InRoomChatSheet(
+    messages: List<ChatMessage>,
+    currentUserId: String,
+    onSendMessage: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var textInput by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = DarkSurface,
+        scrimColor = Color.Black.copy(alpha = 0.65f),
+        dragHandle = null
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(480.dp)
+                .padding(horizontal = 16.dp, vertical = 18.dp)
+                .testTag("in_room_chat_sheet")
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Room Live Chat",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                )
+                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Messages List
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No messages yet. Say hi to the room! 👋",
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(messages, key = { it.id }) { msg ->
+                        val isSelf = msg.senderId == currentUserId
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isSelf) Arrangement.End else Arrangement.Start
+                        ) {
+                            Surface(
+                                color = if (isSelf) AccentGold else DarkSurfaceVariant,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.widthIn(max = 280.dp)
+                            ) {
+                                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                    if (!isSelf) {
+                                        Text(
+                                            text = msg.senderName,
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                color = AccentCyan,
+                                                fontSize = 10.sp
+                                            )
+                                        )
+                                    }
+                                    Text(
+                                        text = msg.text,
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = if (isSelf) DarkBackground else TextPrimary,
+                                            fontSize = 13.sp
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Input Bar
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = textInput,
+                    onValueChange = { textInput = it },
+                    placeholder = { Text("Type a message...", color = TextTertiary, fontSize = 13.sp) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AccentGold,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedContainerColor = DarkSurfaceVariant,
+                        unfocusedContainerColor = DarkSurfaceVariant
+                    ),
+                    shape = RoundedCornerShape(20.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .testTag("chat_input_field")
+                )
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                IconButton(
+                    onClick = {
+                        val text = textInput.trim()
+                        if (text.isNotBlank()) {
+                            onSendMessage(text)
+                            textInput = ""
+                        }
+                    },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(AccentGold, CircleShape)
+                        .testTag("send_chat_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Send,
+                        contentDescription = "Send",
+                        tint = DarkBackground,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -527,8 +839,10 @@ fun ChangeVideoSourceDialog(
     onLoadVideo: (url: String, title: String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val coroutineScope = rememberCoroutineScope()
     var urlInput by remember { mutableStateOf(currentUrl) }
     var error by remember { mutableStateOf<String?>(null) }
+    var isResolving by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -562,7 +876,7 @@ fun ChangeVideoSourceDialog(
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
-                    text = "Paste a Google Drive sharing link or direct video URL:",
+                    text = "Paste a Google Drive sharing link, Dropbox link, or direct video URL:",
                     style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary)
                 )
 
@@ -589,14 +903,25 @@ fun ChangeVideoSourceDialog(
                 )
 
                 if (error != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = error ?: "",
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
-                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = error ?: "",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = Color(0xFFFF8A80),
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            ),
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 // Fast test presets
                 Text(
@@ -627,18 +952,36 @@ fun ChangeVideoSourceDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(22.dp))
+                Spacer(modifier = Modifier.height(20.dp))
 
                 Button(
                     onClick = {
-                        val result = VideoUrlResolver.resolve(urlInput)
-                        if (result.isSuccess) {
-                            val resolved = result.getOrThrow()
-                            onLoadVideo(resolved.directPlayableUrl, resolved.title)
-                        } else {
-                            error = result.exceptionOrNull()?.message ?: "Invalid video link"
+                        val trimmed = urlInput.trim()
+                        if (trimmed.isBlank()) {
+                            error = "Please enter a video URL or Drive link"
+                            return@Button
+                        }
+                        isResolving = true
+                        error = null
+                        coroutineScope.launch {
+                            try {
+                                val resolved = VideoUrlResolver.resolveAsync(trimmed)
+                                onLoadVideo(resolved.directPlayableUrl, resolved.title)
+                            } catch (e: Exception) {
+                                // Fallback to synchronous resolve
+                                val syncRes = VideoUrlResolver.resolve(trimmed)
+                                if (syncRes.isSuccess) {
+                                    val resolved = syncRes.getOrThrow()
+                                    onLoadVideo(resolved.directPlayableUrl, resolved.title)
+                                } else {
+                                    error = syncRes.exceptionOrNull()?.message ?: e.localizedMessage ?: "Invalid video link"
+                                }
+                            } finally {
+                                isResolving = false
+                            }
                         }
                     },
+                    enabled = !isResolving,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AccentGold,
                         contentColor = DarkBackground
@@ -649,7 +992,17 @@ fun ChangeVideoSourceDialog(
                         .height(48.dp)
                         .testTag("confirm_load_video_btn")
                 ) {
-                    Text("Load & Play in Room", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    if (isResolving) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            color = DarkBackground,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Resolving Stream...", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    } else {
+                        Text("Load & Play in Room", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    }
                 }
             }
         }

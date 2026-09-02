@@ -27,22 +27,28 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.ClosedCaptionDisabled
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.VolumeMute
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
@@ -52,6 +58,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,11 +77,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.example.data.PlaybackAction
 import com.example.data.PlaybackState
@@ -94,6 +104,10 @@ fun SarnasVideoPlayer(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
+    var activePlayUrl by remember { mutableStateOf(playbackState.videoUrl) }
+    var triedCandidates by remember { mutableStateOf<List<String>>(emptyList()) }
+    var candidateIndex by remember { mutableIntStateOf(0) }
+
     var playerError by remember { mutableStateOf<String?>(null) }
     var isBuffering by remember { mutableStateOf(false) }
     var isControlsVisible by remember { mutableStateOf(true) }
@@ -103,20 +117,74 @@ fun SarnasVideoPlayer(
     var isFullscreen by remember { mutableStateOf(false) }
     var isDraggingSlider by remember { mutableStateOf(false) }
     var sliderProgress by remember { mutableFloatStateOf(0f) }
+    var showDriveHelp by remember { mutableStateOf(false) }
 
     // Auto-hide controls timer
     LaunchedEffect(isControlsVisible, playbackState.isPlaying) {
         if (isControlsVisible && playbackState.isPlaying && !isDraggingSlider) {
-            delay(4000)
+            delay(4500)
             isControlsVisible = false
         }
     }
 
-    // Initialize ExoPlayer
+    // Build configured ExoPlayer with HTTP Data Source, cross-protocol redirects & browser User-Agent
     val exoPlayer = remember {
-        ExoPlayer.Builder(context).build().apply {
-            repeatMode = Player.REPEAT_MODE_OFF
-            playWhenReady = false
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent("Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(20000)
+            .setReadTimeoutMs(30000)
+
+        val dataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+
+        ExoPlayer.Builder(context)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
+                repeatMode = Player.REPEAT_MODE_OFF
+                playWhenReady = false
+            }
+    }
+
+    fun loadMediaUrl(url: String, seekPosition: Long = 0L, playWhenReady: Boolean = false) {
+        if (url.isBlank()) return
+        try {
+            playerError = null
+            isBuffering = true
+
+            val uri = Uri.parse(url)
+            val builder = MediaItem.Builder().setUri(uri)
+
+            // Explicit MIME types for streaming playlists
+            when {
+                url.contains(".m3u8", ignoreCase = true) -> builder.setMimeType(MimeTypes.APPLICATION_M3U8)
+                url.contains(".mpd", ignoreCase = true) -> builder.setMimeType(MimeTypes.APPLICATION_MPD)
+                url.contains(".mp4", ignoreCase = true) -> builder.setMimeType(MimeTypes.VIDEO_MP4)
+            }
+
+            exoPlayer.setMediaItem(builder.build())
+            exoPlayer.prepare()
+            if (seekPosition > 0L) {
+                exoPlayer.seekTo(seekPosition)
+            }
+            exoPlayer.playWhenReady = playWhenReady
+        } catch (e: Exception) {
+            playerError = "Failed to load stream: ${e.localizedMessage}"
+            isBuffering = false
+        }
+    }
+
+    // Try alternate candidate stream (e.g. for Google Drive or CDNs with multiple endpoints)
+    fun tryNextAlternativeSource() {
+        val candidates = VideoUrlResolver.getAlternativeCandidateUrls(playbackState.videoUrl)
+        val nextCandidate = candidates.firstOrNull { !triedCandidates.contains(it) }
+        if (nextCandidate != null) {
+            triedCandidates = triedCandidates + nextCandidate
+            activePlayUrl = nextCandidate
+            loadMediaUrl(nextCandidate, exoPlayer.currentPosition, true)
+        } else {
+            // Re-try original with clean state
+            loadMediaUrl(playbackState.videoUrl, 0L, true)
         }
     }
 
@@ -146,12 +214,32 @@ fun SarnasVideoPlayer(
 
             override fun onPlayerError(error: PlaybackException) {
                 isBuffering = false
+                val isDrive = playbackState.videoUrl.contains("drive.google.com") ||
+                        playbackState.videoUrl.contains("googleusercontent.com")
+
+                val alternatives = VideoUrlResolver.getAlternativeCandidateUrls(playbackState.videoUrl)
+                val untried = alternatives.filter { !triedCandidates.contains(it) }
+
+                if (isDrive && untried.isNotEmpty()) {
+                    // Automatically attempt fallback endpoint before giving up
+                    val next = untried.first()
+                    triedCandidates = triedCandidates + next
+                    activePlayUrl = next
+                    loadMediaUrl(next, exoPlayer.currentPosition, playbackState.isPlaying)
+                    return
+                }
+
                 playerError = when {
-                    playbackState.videoUrl.contains("drive.google.com") ->
-                        "Google Drive video cannot be accessed. Make sure sharing is set to 'Anyone with the link can view'."
+                    isDrive ->
+                        "Google Drive video cannot be accessed directly.\nMake sure file sharing is set to 'Anyone with the link' (Viewer)."
                     error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ->
-                        "Network interruption while loading video. Please check connection."
-                    else -> "Unable to play video: ${error.localizedMessage ?: "Invalid or unsupported stream format"}"
+                        "Network connection interrupted. Please check your internet connection."
+                    error.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
+                        "Server returned an access error (HTTP ${error.message ?: "403/404"}). Check link permissions."
+                    error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED ||
+                    error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ->
+                        "Video format could not be decoded. Ensure the link points directly to a supported video (.mp4, .m3u8, .mkv, .webm)."
+                    else -> "Unable to play video: ${error.localizedMessage ?: "Invalid or restricted video stream"}"
                 }
             }
         }
@@ -163,28 +251,18 @@ fun SarnasVideoPlayer(
         }
     }
 
-    // Sync media source when videoUrl changes
+    // When videoUrl changes from sync or user action
     LaunchedEffect(playbackState.videoUrl) {
         if (playbackState.videoUrl.isNotBlank()) {
-            playerError = null
-            isBuffering = true
-            try {
-                val mediaItem = MediaItem.fromUri(Uri.parse(playbackState.videoUrl))
-                exoPlayer.setMediaItem(mediaItem)
-                exoPlayer.prepare()
-                if (playbackState.positionMs > 0) {
-                    exoPlayer.seekTo(playbackState.positionMs)
-                }
-                exoPlayer.playWhenReady = playbackState.isPlaying
-            } catch (e: Exception) {
-                playerError = "Failed to load video stream: ${e.localizedMessage}"
-            }
+            activePlayUrl = playbackState.videoUrl
+            triedCandidates = listOf(playbackState.videoUrl)
+            loadMediaUrl(playbackState.videoUrl, playbackState.positionMs, playbackState.isPlaying)
         }
     }
 
     // Handle incoming synchronization updates (Play/Pause/Seek/Skip)
     LaunchedEffect(playbackState.updatedAt, playbackState.isPlaying, playbackState.lastAction) {
-        if (playbackState.videoUrl.isNotBlank()) {
+        if (activePlayUrl.isNotBlank() && exoPlayer.playbackState != Player.STATE_IDLE) {
             // Apply play / pause state
             if (exoPlayer.playWhenReady != playbackState.isPlaying) {
                 exoPlayer.playWhenReady = playbackState.isPlaying
@@ -281,14 +359,15 @@ fun SarnasVideoPlayer(
             )
         }
 
-        // Error message overlay
+        // Error message overlay with actionable troubleshooting
         if (playerError != null) {
             Surface(
-                color = Color(0xDD14161F),
-                shape = RoundedCornerShape(16.dp),
+                color = Color(0xF014161F),
+                shape = RoundedCornerShape(20.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE5A93C).copy(alpha = 0.4f)),
                 modifier = Modifier
-                    .padding(24.dp)
-                    .fillMaxWidth(0.9f)
+                    .padding(20.dp)
+                    .fillMaxWidth(0.92f)
             ) {
                 Column(
                     modifier = Modifier.padding(20.dp),
@@ -298,33 +377,95 @@ fun SarnasVideoPlayer(
                         imageVector = Icons.Default.ErrorOutline,
                         contentDescription = "Error",
                         tint = Color(0xFFE5A93C),
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(38.dp)
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Video Stream Issue",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFFF0F2F8)
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = playerError ?: "Error",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            color = Color(0xFFF0F2F8),
-                            lineHeight = 20.sp
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = Color(0xFFB0B5C6),
+                            lineHeight = 18.sp
                         ),
-                        modifier = Modifier.padding(horizontal = 8.dp)
+                        modifier = Modifier.padding(horizontal = 6.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
+
                     Spacer(modifier = Modifier.height(16.dp))
-                    IconButton(
-                        onClick = {
-                            playerError = null
-                            exoPlayer.prepare()
-                            exoPlayer.playWhenReady = true
-                        },
-                        modifier = Modifier
-                            .background(Color(0xFFE5A93C), CircleShape)
-                            .testTag("retry_video_button")
+
+                    // Google Drive specific help box
+                    if (playbackState.videoUrl.contains("drive.google.com") || playbackState.videoUrl.contains("googleusercontent.com")) {
+                        Surface(
+                            color = Color(0xFF1E2130),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showDriveHelp = !showDriveHelp }
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.HelpOutline, contentDescription = null, tint = Color(0xFF4E95FF), modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("How to make Google Drive links public", style = MaterialTheme.typography.labelMedium.copy(color = Color(0xFF4E95FF), fontWeight = FontWeight.SemiBold))
+                                    }
+                                    Text(if (showDriveHelp) "Hide" else "Show", style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFFB0B5C6)))
+                                }
+
+                                if (showDriveHelp) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text("1. Open Google Drive and find the video.\n2. Tap 'Share' (or 3 dots > Share).\n3. Under 'General access', change from 'Restricted' to 'Anyone with the link' (Viewer).\n4. Tap 'Copy link' and paste into SARNAS.",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFFF0F2F8), fontSize = 11.sp, lineHeight = 16.sp))
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
+                    }
+
+                    // Action Buttons: Try Alternative Route | Retry
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Retry",
-                            tint = Color(0xFF0B0C10)
-                        )
+                        OutlinedButton(
+                            onClick = {
+                                tryNextAlternativeSource()
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f).height(40.dp)
+                        ) {
+                            Icon(Icons.Default.AltRoute, contentDescription = null, modifier = Modifier.size(14.dp), tint = Color(0xFF4E95FF))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Alternate CDN", style = MaterialTheme.typography.labelSmall.copy(color = Color(0xFF4E95FF)))
+                        }
+
+                        Button(
+                            onClick = {
+                                playerError = null
+                                loadMediaUrl(activePlayUrl, exoPlayer.currentPosition, true)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFE5A93C),
+                                contentColor = Color(0xFF0B0C10)
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f).height(40.dp).testTag("retry_video_button")
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Retry", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                        }
                     }
                 }
             }

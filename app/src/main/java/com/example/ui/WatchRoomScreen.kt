@@ -25,8 +25,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
@@ -74,11 +77,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -687,6 +693,8 @@ fun InRoomChatSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var textInput by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -695,7 +703,11 @@ fun InRoomChatSheet(
     }
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            onDismiss()
+        },
         sheetState = sheetState,
         containerColor = DarkSurface,
         scrimColor = Color.Black.copy(alpha = 0.65f),
@@ -705,6 +717,8 @@ fun InRoomChatSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(480.dp)
+                .imePadding()
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 18.dp)
                 .testTag("in_room_chat_sheet")
         ) {
@@ -720,7 +734,14 @@ fun InRoomChatSheet(
                         color = TextPrimary
                     )
                 )
-                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                IconButton(
+                    onClick = {
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
+                        onDismiss()
+                    },
+                    modifier = Modifier.size(28.dp)
+                ) {
                     Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                 }
             }
@@ -817,6 +838,8 @@ fun InRoomChatSheet(
                         if (text.isNotBlank()) {
                             onSendMessage(text)
                             textInput = ""
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
                         }
                     },
                     modifier = Modifier
@@ -846,13 +869,28 @@ fun ChangeVideoSourceDialog(
     var urlInput by remember { mutableStateOf(currentUrl) }
     var error by remember { mutableStateOf<String?>(null) }
     var isResolving by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            onDismiss()
+        },
+        properties = DialogProperties(
+            decorFitsSystemWindows = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
             border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
-            modifier = Modifier.fillMaxWidth().testTag("change_video_dialog")
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .imePadding()
+                .testTag("change_video_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -871,7 +909,14 @@ fun ChangeVideoSourceDialog(
                             color = TextPrimary
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            onDismiss()
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                     }
                 }
@@ -966,6 +1011,8 @@ fun ChangeVideoSourceDialog(
                         }
                         isResolving = true
                         error = null
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
                         coroutineScope.launch {
                             try {
                                 val resolved = VideoUrlResolver.resolveAsync(trimmed)
@@ -1036,6 +1083,7 @@ fun InRoomInviteSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 24.dp)
                 .testTag("in_room_invite_sheet")
         ) {
@@ -1184,6 +1232,7 @@ fun RoomParticipantsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 24.dp)
                 .testTag("room_participants_sheet")
         ) {

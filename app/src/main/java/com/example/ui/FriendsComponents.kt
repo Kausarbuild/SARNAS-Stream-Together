@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -46,11 +48,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.data.Friend
 import com.example.ui.theme.AccentCyan
@@ -74,9 +79,15 @@ fun FriendsBottomSheet(
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var isAddingFriend by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            onDismiss()
+        },
         sheetState = sheetState,
         containerColor = DarkSurface,
         scrimColor = Color.Black.copy(alpha = 0.65f),
@@ -85,6 +96,8 @@ fun FriendsBottomSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
+                .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 24.dp)
                 .testTag("friends_bottom_sheet")
         ) {
@@ -321,13 +334,28 @@ fun AddFriendDialog(
     var friendName by remember { mutableStateOf("") }
     var selectedColor by remember { mutableStateOf(AVATAR_PALETTES.random()) }
     var error by remember { mutableStateOf<String?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            onDismiss()
+        },
+        properties = DialogProperties(
+            decorFitsSystemWindows = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
             border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
-            modifier = Modifier.fillMaxWidth().testTag("add_friend_dialog")
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .imePadding()
+                .testTag("add_friend_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -347,7 +375,14 @@ fun AddFriendDialog(
                             color = TextPrimary
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            onDismiss()
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                     }
                 }
@@ -414,6 +449,8 @@ fun AddFriendDialog(
                         if (friendName.trim().isBlank()) {
                             error = "Please enter a name"
                         } else {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
                             onAdd(friendName.trim(), selectedColor)
                         }
                     },

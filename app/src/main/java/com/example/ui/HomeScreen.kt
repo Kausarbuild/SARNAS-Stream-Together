@@ -12,19 +12,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Login
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.VideoLibrary
@@ -48,11 +51,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.data.Friend
 import com.example.data.SavedRoom
@@ -87,10 +93,13 @@ fun HomeScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBackground)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .imePadding()
             .padding(horizontal = 20.dp)
             .testTag("home_screen")
     ) {
-        Spacer(modifier = Modifier.height(48.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         // Top Header: Branding + Profile Avatar Button
         Row(
@@ -285,7 +294,7 @@ fun HomeScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Login,
+                        imageVector = Icons.AutoMirrored.Filled.Login,
                         contentDescription = null,
                         tint = AccentCyan,
                         modifier = Modifier.size(24.dp)
@@ -427,13 +436,28 @@ fun CreateRoomDialog(
     var videoUrl by remember { mutableStateOf("") }
     var selectedPreset by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    Dialog(onDismissRequest = onDismiss) {
+    Dialog(
+        onDismissRequest = {
+            focusManager.clearFocus()
+            keyboardController?.hide()
+            onDismiss()
+        },
+        properties = DialogProperties(
+            decorFitsSystemWindows = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
             border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
-            modifier = Modifier.fillMaxWidth().testTag("create_room_dialog")
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .imePadding()
+                .testTag("create_room_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -452,7 +476,14 @@ fun CreateRoomDialog(
                             color = TextPrimary
                         )
                     )
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    IconButton(
+                        onClick = {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
+                            onDismiss()
+                        },
+                        modifier = Modifier.size(28.dp)
+                    ) {
                         Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                     }
                 }
@@ -555,6 +586,8 @@ fun CreateRoomDialog(
 
                 Button(
                     onClick = {
+                        focusManager.clearFocus()
+                        keyboardController?.hide()
                         val trimmedName = if (roomName.trim().isNotBlank()) roomName.trim() else "Watch Room"
                         if (videoUrl.isNotBlank()) {
                             val res = VideoUrlResolver.resolve(videoUrl)
@@ -593,13 +626,30 @@ fun JoinRoomDialog(
     var roomInput by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var isVerifying by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
-    Dialog(onDismissRequest = { if (!isVerifying) onDismiss() }) {
+    Dialog(
+        onDismissRequest = {
+            if (!isVerifying) {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+                onDismiss()
+            }
+        },
+        properties = DialogProperties(
+            decorFitsSystemWindows = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
             border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
-            modifier = Modifier.fillMaxWidth().testTag("join_room_dialog")
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .imePadding()
+                .testTag("join_room_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -619,7 +669,14 @@ fun JoinRoomDialog(
                         )
                     )
                     if (!isVerifying) {
-                        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                        IconButton(
+                            onClick = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onDismiss()
+                            },
+                            modifier = Modifier.size(28.dp)
+                        ) {
                             Icon(Icons.Default.Close, contentDescription = "Close", tint = TextSecondary)
                         }
                     }
@@ -691,10 +748,14 @@ fun JoinRoomDialog(
                             }
                             isVerifying = true
                             error = null
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
                             onJoin(
                                 code.uppercase(),
                                 {
                                     isVerifying = false
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
                                     onDismiss()
                                 },
                                 { errMsg ->

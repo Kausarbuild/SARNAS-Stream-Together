@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,11 +43,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.data.UserProfile
 import com.example.ui.theme.AccentGold
@@ -78,6 +82,9 @@ fun ProfileSetupDialog(
     var selectedColor by remember { mutableStateOf(initialProfile?.avatarColorHex ?: "#E5A93C") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
         onResult = { uri: Uri? ->
@@ -87,12 +94,27 @@ fun ProfileSetupDialog(
         }
     )
 
-    Dialog(onDismissRequest = { if (!isInitialSetup) onDismiss() }) {
+    Dialog(
+        onDismissRequest = {
+            if (!isInitialSetup) {
+                focusManager.clearFocus()
+                keyboardController?.hide()
+                onDismiss()
+            }
+        },
+        properties = DialogProperties(
+            decorFitsSystemWindows = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
         Surface(
             color = DarkSurface,
             shape = RoundedCornerShape(24.dp),
             border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
-            modifier = Modifier.fillMaxWidth().testTag("profile_dialog")
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .imePadding()
+                .testTag("profile_dialog")
         ) {
             Column(
                 modifier = Modifier
@@ -114,7 +136,11 @@ fun ProfileSetupDialog(
                     )
                     if (!isInitialSetup) {
                         IconButton(
-                            onClick = onDismiss,
+                            onClick = {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onDismiss()
+                            },
                             modifier = Modifier.size(32.dp).testTag("close_profile_button")
                         ) {
                             Icon(
@@ -280,6 +306,8 @@ fun ProfileSetupDialog(
                         if (name.trim().isBlank()) {
                             errorMessage = "Please enter your name"
                         } else {
+                            focusManager.clearFocus()
+                            keyboardController?.hide()
                             onSave(name.trim(), avatarUri, selectedColor)
                         }
                     },

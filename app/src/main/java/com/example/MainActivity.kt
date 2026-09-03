@@ -6,6 +6,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
@@ -58,11 +60,13 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         containerColor = DarkBackground
     ) { innerPadding ->
         Box(
             modifier = Modifier
                 .fillMaxSize()
+                .consumeWindowInsets(innerPadding)
                 .background(DarkBackground)
         ) {
             when (currentScreen) {

@@ -300,7 +300,7 @@ class RoomSyncManager private constructor() {
 
     private fun initVoiceChat() {
         voiceChatManager?.release()
-        voiceChatManager = VoiceChatManager { audioBytes ->
+        voiceChatManager = VoiceChatManager(appContext) { audioBytes ->
             sendAudioPacket(audioBytes)
         }
         if (_isMicrophoneEnabled.value) {

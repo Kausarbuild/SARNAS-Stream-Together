@@ -1,7 +1,9 @@
 package com.example.audio
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -9,6 +11,7 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -31,6 +34,7 @@ import java.nio.ByteOrder
  * 5. Plays received peer audio in real-time using streaming AudioTrack.
  */
 class VoiceChatManager(
+    private val context: Context? = null,
     private val onAudioPacketReady: (ByteArray) -> Unit
 ) {
     private val tag = "VoiceChatManager"
@@ -135,6 +139,10 @@ class VoiceChatManager(
 
     @SuppressLint("MissingPermission")
     fun startRecording() {
+        if (context != null && ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(tag, "Record audio permission not granted; skipping voice chat recording")
+            return
+        }
         if (isRecording) return
         isRecording = true
         isMuted = false

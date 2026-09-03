@@ -1,6 +1,8 @@
 package com.example.camera
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.util.Log
 import androidx.camera.core.CameraSelector
@@ -253,29 +255,57 @@ fun WebRtcSurfaceRenderer(
     isMirror: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    var rendererRef by remember { mutableStateOf<SurfaceViewRenderer?>(null) }
+
+    DisposableEffect(videoTrack, rendererRef) {
+        val r = rendererRef
+        if (r != null) {
+            try {
+                videoTrack.addSink(r)
+            } catch (e: Exception) {
+                Log.w("WebRtcSurfaceRenderer", "Failed to add sink: ${e.message}")
+            }
+        }
+        onDispose {
+            if (r != null) {
+                try {
+                    videoTrack.removeSink(r)
+                } catch (e: Exception) {
+                    Log.w("WebRtcSurfaceRenderer", "Failed to remove sink: ${e.message}")
+                }
+            }
+        }
+    }
+
     AndroidView(
         factory = { ctx ->
             SurfaceViewRenderer(ctx).apply {
-                init(eglBaseContext, null)
-                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
-                setEnableHardwareScaler(true)
-                setMirror(isMirror)
-                setZOrderMediaOverlay(true)
-                videoTrack.addSink(this)
+                try {
+                    init(eglBaseContext, null)
+                    setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                    setEnableHardwareScaler(true)
+                    setMirror(isMirror)
+                    setZOrderMediaOverlay(true)
+                } catch (e: Exception) {
+                    Log.e("WebRtcSurfaceRenderer", "Init failed: ${e.message}")
+                }
+                rendererRef = this
             }
         },
         update = { renderer ->
-            renderer.setMirror(isMirror)
-            renderer.setZOrderMediaOverlay(true)
             try {
-                videoTrack.addSink(renderer)
+                renderer.setMirror(isMirror)
+                renderer.setZOrderMediaOverlay(true)
             } catch (e: Exception) {}
         },
         onRelease = { renderer ->
             try {
                 videoTrack.removeSink(renderer)
+            } catch (e: Exception) {}
+            try {
                 renderer.release()
             } catch (e: Exception) {}
+            rendererRef = null
         },
         modifier = modifier
     )
@@ -291,11 +321,18 @@ fun CameraPreview(
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
 
     DisposableEffect(lifecycleOwner) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Log.w("CameraBubble", "Camera permission not granted; skipping CameraPreview binding")
+            return@DisposableEffect onDispose {}
+        }
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val executor = ContextCompat.getMainExecutor(context)
 
         cameraProviderFuture.addListener({
             try {
+                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    return@addListener
+                }
                 val cameraProvider = cameraProviderFuture.get()
                 val preview = Preview.Builder().build().also {
                     previewView?.let { pView ->

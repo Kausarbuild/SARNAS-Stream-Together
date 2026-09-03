@@ -1,7 +1,10 @@
 package com.example.webrtc
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,9 +69,16 @@ class WebRtcManager(
     private val tag = "WebRtcManager"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    val rootEglBase: EglBase = EglBase.create()
+    val rootEglBase: EglBase get() = getOrCreateEglBase()
 
-    private var factory: PeerConnectionFactory? = null
+    private val factory: PeerConnectionFactory? by lazy {
+        try {
+            getOrCreateFactory(context, rootEglBase)
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to get PeerConnectionFactory: ${e.message}", e)
+            null
+        }
+    }
     private var videoSource: VideoSource? = null
     private var videoCapturer: VideoCapturer? = null
     private var surfaceTextureHelper: SurfaceTextureHelper? = null
@@ -93,36 +103,14 @@ class WebRtcManager(
         PeerConnection.IceServer.builder("stun:stun.relay.metered.ca:80").createIceServer()
     )
 
-    init {
-        initializePeerConnectionFactory()
-    }
-
-    private fun initializePeerConnectionFactory() {
-        try {
-            val options = PeerConnectionFactory.InitializationOptions.builder(context)
-                .setEnableInternalTracer(false)
-                .createInitializationOptions()
-            PeerConnectionFactory.initialize(options)
-
-            val encoderFactory = DefaultVideoEncoderFactory(rootEglBase.eglBaseContext, true, true)
-            val decoderFactory = DefaultVideoDecoderFactory(rootEglBase.eglBaseContext)
-
-            factory = PeerConnectionFactory.builder()
-                .setVideoEncoderFactory(encoderFactory)
-                .setVideoDecoderFactory(decoderFactory)
-                .setOptions(PeerConnectionFactory.Options())
-                .createPeerConnectionFactory()
-
-            Log.d(tag, "WebRTC PeerConnectionFactory initialized successfully.")
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to initialize PeerConnectionFactory: ${e.message}", e)
-        }
-    }
-
     /**
      * Initializes local audio track with acoustic echo cancellation.
      */
     fun startLocalAudio(initialMuted: Boolean = false) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(tag, "Audio record permission not granted; skipping WebRTC audio")
+            return
+        }
         val f = factory ?: return
         if (localAudioTrack != null) return
 
@@ -156,6 +144,10 @@ class WebRtcManager(
      * Initializes local video track from front camera.
      */
     fun startLocalVideo(initialCameraOn: Boolean = true) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(tag, "Camera permission not granted; skipping WebRTC video")
+            return
+        }
         val f = factory ?: return
         if (localVideoTrack != null) return
 
@@ -437,15 +429,7 @@ class WebRtcManager(
             override fun onDataChannel(dataChannel: org.webrtc.DataChannel?) {}
 
             override fun onRenegotiationNeeded() {
-                Log.d(tag, "Peer [$peerId] renegotiation needed")
-                try {
-                    val conn = pcRef
-                    if (conn != null && conn.signalingState() == PeerConnection.SignalingState.STABLE) {
-                        initiateCallToPeer(peerId)
-                    }
-                } catch (e: Exception) {
-                    Log.w(tag, "Error handling renegotiation: ${e.message}")
-                }
+                Log.d(tag, "Peer [$peerId] renegotiation needed (negotiation handled via RoomSyncManager)")
             }
 
             override fun onTrack(transceiver: RtpTransceiver?) {
@@ -506,7 +490,8 @@ class WebRtcManager(
     }
 
     /**
-     * Disposes all WebRTC resources upon leaving the room.
+     * Disposes all WebRTC room resources upon leaving the room.
+     * Note: PeerConnectionFactory and EglBase are process-level singletons and preserved.
      */
     fun close() {
         peerConnections.values.forEach { pc ->
@@ -531,11 +516,47 @@ class WebRtcManager(
         localVideoTrack = null
         localAudioTrack = null
 
-        try { factory?.dispose() } catch (e: Exception) {}
-        factory = null
+        Log.d(tag, "WebRTC room session resources fully closed.")
+    }
 
-        try { rootEglBase.release() } catch (e: Exception) {}
-        Log.d(tag, "WebRTC resources fully closed and released.")
+    companion object {
+        @Volatile
+        private var sharedEglBase: EglBase? = null
+        @Volatile
+        private var sharedFactory: PeerConnectionFactory? = null
+        private val lock = Any()
+
+        fun getOrCreateEglBase(): EglBase {
+            return sharedEglBase ?: synchronized(lock) {
+                sharedEglBase ?: EglBase.create().also { sharedEglBase = it }
+            }
+        }
+
+        fun getOrCreateFactory(context: Context, eglBase: EglBase): PeerConnectionFactory {
+            return sharedFactory ?: synchronized(lock) {
+                sharedFactory ?: run {
+                    try {
+                        val options = PeerConnectionFactory.InitializationOptions.builder(context.applicationContext)
+                            .setEnableInternalTracer(false)
+                            .createInitializationOptions()
+                        PeerConnectionFactory.initialize(options)
+
+                        val encoderFactory = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true)
+                        val decoderFactory = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
+
+                        PeerConnectionFactory.builder()
+                            .setVideoEncoderFactory(encoderFactory)
+                            .setVideoDecoderFactory(decoderFactory)
+                            .setOptions(PeerConnectionFactory.Options())
+                            .createPeerConnectionFactory()
+                            .also { sharedFactory = it }
+                    } catch (e: Exception) {
+                        Log.e("WebRtcManager", "Failed to create shared PeerConnectionFactory: ${e.message}", e)
+                        throw e
+                    }
+                }
+            }
+        }
     }
 
     open class SimpleSdpObserver : SdpObserver {

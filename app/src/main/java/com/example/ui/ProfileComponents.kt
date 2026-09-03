@@ -47,6 +47,9 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -60,6 +63,7 @@ import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.DarkSurfaceVariant
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.TextTertiary
 
 val AVATAR_PALETTES = listOf(
     "#E5A93C", // Gold
@@ -74,16 +78,19 @@ val AVATAR_PALETTES = listOf(
 fun ProfileSetupDialog(
     initialProfile: UserProfile?,
     isInitialSetup: Boolean = false,
-    onSave: (name: String, avatarUri: String?, colorHex: String) -> Unit,
+    onSave: (name: String, username: String, avatarUri: String?, colorHex: String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var name by remember { mutableStateOf(initialProfile?.name ?: "") }
+    var username by remember { mutableStateOf(initialProfile?.username ?: "") }
+    var hasUserEditedUsername by remember { mutableStateOf(!initialProfile?.username.isNullOrBlank()) }
     var avatarUri by remember { mutableStateOf<String?>(initialProfile?.avatarUri) }
     var selectedColor by remember { mutableStateOf(initialProfile?.avatarColorHex ?: "#E5A93C") }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val scrollState = rememberScrollState()
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -119,6 +126,8 @@ fun ProfileSetupDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(max = 680.dp)
+                    .verticalScroll(scrollState)
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -270,11 +279,16 @@ fun ProfileSetupDialog(
                 // Name Input Field
                 OutlinedTextField(
                     value = name,
-                    onValueChange = {
-                        name = it
+                    onValueChange = { newName ->
+                        name = newName
                         errorMessage = null
+                        if (!hasUserEditedUsername) {
+                            val candidate = newName.trim().lowercase().filter { it.isLetterOrDigit() || it == '_' }
+                            username = candidate
+                        }
                     },
-                    label = { Text("Your Display Name") },
+                    label = { Text("Display Name") },
+                    placeholder = { Text("e.g. Alex Rider", color = TextTertiary) },
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = AccentGold,
@@ -290,11 +304,62 @@ fun ProfileSetupDialog(
                         .testTag("name_input_field")
                 )
 
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Unique Username Input Field
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { raw ->
+                        hasUserEditedUsername = true
+                        username = raw.trim().lowercase().removePrefix("@").filter { it.isLetterOrDigit() || it == '_' }
+                        errorMessage = null
+                    },
+                    label = { Text("Unique Username (@handle)") },
+                    prefix = {
+                        Text(
+                            text = "@",
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = AccentGold
+                            )
+                        )
+                    },
+                    placeholder = { Text("e.g. alex_stream", color = TextTertiary) },
+                    singleLine = true,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = AccentGold,
+                        unfocusedBorderColor = DarkBorder,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary,
+                        focusedContainerColor = DarkSurfaceVariant,
+                        unfocusedContainerColor = DarkSurfaceVariant
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("username_input_field")
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Used by friends to search for you and send watch room invites",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp)
+                )
+
                 if (errorMessage != null) {
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
                     Text(
                         text = errorMessage ?: "",
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Medium
+                        )
                     )
                 }
 
@@ -303,12 +368,30 @@ fun ProfileSetupDialog(
                 // Save Profile Button
                 Button(
                     onClick = {
-                        if (name.trim().isBlank()) {
-                            errorMessage = "Please enter your name"
-                        } else {
-                            focusManager.clearFocus()
-                            keyboardController?.hide()
-                            onSave(name.trim(), avatarUri, selectedColor)
+                        val trimmedName = name.trim()
+                        val cleanUsername = username.trim().lowercase().removePrefix("@")
+
+                        when {
+                            trimmedName.isBlank() -> {
+                                errorMessage = "Please enter your display name"
+                            }
+                            cleanUsername.isBlank() -> {
+                                errorMessage = "Please choose a username"
+                            }
+                            cleanUsername.length < 3 -> {
+                                errorMessage = "Username must be at least 3 characters"
+                            }
+                            cleanUsername.length > 20 -> {
+                                errorMessage = "Username cannot exceed 20 characters"
+                            }
+                            !cleanUsername.all { it.isLetterOrDigit() || it == '_' } -> {
+                                errorMessage = "Username can only contain letters, numbers, and underscores"
+                            }
+                            else -> {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onSave(trimmedName, cleanUsername, avatarUri, selectedColor)
+                            }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(

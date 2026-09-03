@@ -182,6 +182,25 @@ class FriendSyncClient private constructor(
     }
 
     /**
+     * Unregisters an old username from the cloud registry so it is no longer retained.
+     */
+    fun unregisterUsername(oldUsername: String) {
+        scope.launch {
+            try {
+                val clean = oldUsername.trim().lowercase()
+                if (clean.isBlank()) return@launch
+                val topic = "sarnas/v2/registry/users/$clean"
+                val emptyPublish = encodePublish(topic, ByteArray(0), retain = true)
+                outputStream?.write(emptyPublish)
+                outputStream?.flush()
+                Log.d(tag, "Unregistered old username '$clean'")
+            } catch (e: Exception) {
+                Log.e(tag, "Error unregistering username: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Queries the actual backend registry for a username.
      * Returns the matching UserProfile, or null if the user does NOT exist.
      */

@@ -68,9 +68,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveProfile(name: String, avatarUri: String?, colorHex: String) {
+    fun saveProfile(name: String, username: String, avatarUri: String?, colorHex: String) {
         viewModelScope.launch {
-            val profile = repository.saveProfile(name, avatarUri = avatarUri, colorHex = colorHex)
+            val existing = repository.getCurrentUser()
+            val oldUsername = existing?.username
+            val profile = repository.saveProfile(name = name, username = username, avatarUri = avatarUri, colorHex = colorHex)
+            if (!oldUsername.isNullOrBlank() && oldUsername.lowercase() != profile.username.lowercase()) {
+                friendSyncClient.unregisterUsername(oldUsername)
+            }
             friendSyncClient.start(profile)
             if (_currentScreen.value == AppScreen.INITIAL_PROFILE) {
                 _currentScreen.value = AppScreen.HOME

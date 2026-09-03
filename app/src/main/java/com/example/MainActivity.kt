@@ -109,8 +109,8 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
                     ProfileSetupDialog(
                         initialProfile = null,
                         isInitialSetup = true,
-                        onSave = { name, avatarUri, colorHex ->
-                            viewModel.saveProfile(name, avatarUri, colorHex)
+                        onSave = { name, username, avatarUri, colorHex ->
+                            viewModel.saveProfile(name, username, avatarUri, colorHex)
                         },
                         onDismiss = {}
                     )
@@ -156,8 +156,8 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
                 ProfileSetupDialog(
                     initialProfile = userProfile,
                     isInitialSetup = false,
-                    onSave = { name, avatarUri, colorHex ->
-                        viewModel.saveProfile(name, avatarUri, colorHex)
+                    onSave = { name, username, avatarUri, colorHex ->
+                        viewModel.saveProfile(name, username, avatarUri, colorHex)
                         showEditProfileDialog = false
                     },
                     onDismiss = { showEditProfileDialog = false }
@@ -168,6 +168,7 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
             if (showFriendsSheet) {
                 FriendsBottomSheet(
                     friends = friends,
+                    currentUser = userProfile,
                     pendingRequests = pendingFriendRequests,
                     onAcceptRequest = { req ->
                         viewModel.acceptFriendRequest(req)
@@ -189,6 +190,10 @@ fun SarnasApp(viewModel: MainViewModel = viewModel()) {
                         viewModel.removeFriend(id)
                     },
                     onInviteToRoom = null,
+                    onEditProfile = {
+                        showFriendsSheet = false
+                        showEditProfileDialog = true
+                    },
                     onDismiss = { showFriendsSheet = false }
                 )
             }

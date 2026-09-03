@@ -206,10 +206,30 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(32.dp))
 
         // Greeting
-        Text(
-            text = "Welcome back, ${currentUser.name}",
-            style = MaterialTheme.typography.bodyMedium.copy(color = TextSecondary)
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Welcome back, ${currentUser.name}",
+                style = MaterialTheme.typography.bodyMedium.copy(color = TextSecondary)
+            )
+            if (currentUser.username.isNotBlank()) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Surface(
+                    color = DarkSurfaceVariant,
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentGold.copy(alpha = 0.3f)),
+                    modifier = Modifier.clickable { onOpenProfile() }.testTag("home_user_handle_chip")
+                ) {
+                    Text(
+                        text = "@${currentUser.username}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = AccentGold,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
         Text(
             text = "Watch synchronized in real time",
             style = MaterialTheme.typography.titleMedium.copy(

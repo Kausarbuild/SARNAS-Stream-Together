@@ -77,11 +77,19 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.TextButton
 import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Edit
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FriendsBottomSheet(
     friends: List<Friend>,
+    currentUser: UserProfile? = null,
     pendingRequests: List<FriendRequest> = emptyList(),
     onAcceptRequest: (FriendRequest) -> Unit = {},
     onDeclineRequest: (String) -> Unit = {},
@@ -90,12 +98,14 @@ fun FriendsBottomSheet(
     onAddFriend: (name: String, colorHex: String) -> Unit,
     onRemoveFriend: (String) -> Unit,
     onInviteToRoom: ((Friend) -> Unit)? = null,
+    onEditProfile: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var isAddingFriend by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
 
     ModalBottomSheet(
         onDismissRequest = {
@@ -155,7 +165,81 @@ fun FriendsBottomSheet(
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // User's own searchable handle banner
+            if (currentUser != null && currentUser.username.isNotBlank()) {
+                Surface(
+                    color = DarkSurfaceVariant,
+                    shape = RoundedCornerShape(14.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentGold.copy(alpha = 0.25f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("user_handle_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Your Searchable Username",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            )
+                            Text(
+                                text = "@${currentUser.username}",
+                                style = MaterialTheme.typography.bodyLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentGold
+                                )
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    clipboard?.setPrimaryClip(ClipData.newPlainText("Username", "@${currentUser.username}"))
+                                    Toast.makeText(context, "Copied @${currentUser.username} to clipboard", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .testTag("copy_username_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ContentCopy,
+                                    contentDescription = "Copy Username",
+                                    tint = TextSecondary,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            if (onEditProfile != null) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = onEditProfile,
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .testTag("edit_handle_button")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "Change Username",
+                                        tint = AccentCyan,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(14.dp))
+            }
 
             // Pending Friend Requests Section
             if (pendingRequests.isNotEmpty()) {
@@ -242,6 +326,7 @@ fun FriendsBottomSheet(
 
     if (isAddingFriend) {
         AddFriendDialog(
+            currentUser = currentUser,
             onSearchUser = onSearchUser,
             onSendFriendRequest = onSendFriendRequest,
             onAdd = { name, colorHex ->
@@ -456,6 +541,7 @@ fun FriendItemRow(
 
 @Composable
 fun AddFriendDialog(
+    currentUser: UserProfile? = null,
     onSearchUser: ((String, (UserProfile?) -> Unit) -> Unit)? = null,
     onSendFriendRequest: ((UserProfile, (Boolean, String) -> Unit) -> Unit)? = null,
     onAdd: (name: String, colorHex: String) -> Unit,
@@ -535,6 +621,19 @@ fun AddFriendDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
 
+                if (currentUser != null && currentUser.username.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Your username is @${currentUser.username} (give this to friends so they can add you)",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = AccentGold,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Row(
@@ -569,21 +668,28 @@ fun AddFriendDialog(
 
                     Button(
                         onClick = {
-                            val query = searchUsername.trim().removePrefix("@")
-                            if (query.isNotBlank() && onSearchUser != null) {
-                                isSearching = true
-                                searchResult = null
-                                searchMessage = null
-                                requestStatusMessage = null
-                                focusManager.clearFocus()
-                                keyboardController?.hide()
+                            val query = searchUsername.trim().lowercase().removePrefix("@")
+                            if (query.isNotBlank()) {
+                                if (currentUser != null && query == currentUser.username.lowercase()) {
+                                    searchMessage = "That's your own username (@$query)!"
+                                    searchResult = null
+                                    return@Button
+                                }
+                                if (onSearchUser != null) {
+                                    isSearching = true
+                                    searchResult = null
+                                    searchMessage = null
+                                    requestStatusMessage = null
+                                    focusManager.clearFocus()
+                                    keyboardController?.hide()
 
-                                onSearchUser(query) { result ->
-                                    isSearching = false
-                                    if (result != null) {
-                                        searchResult = result
-                                    } else {
-                                        searchMessage = "User not found"
+                                    onSearchUser(query) { result ->
+                                        isSearching = false
+                                        if (result != null) {
+                                            searchResult = result
+                                        } else {
+                                            searchMessage = "No user found with @$query"
+                                        }
                                     }
                                 }
                             }

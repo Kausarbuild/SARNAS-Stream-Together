@@ -151,6 +151,7 @@ fun SarnasVideoPlayer(
     var playerError by remember { mutableStateOf<String?>(null) }
     var isBuffering by remember { mutableStateOf(false) }
     var isControlsVisible by remember { mutableStateOf(true) }
+    var userInteractionTrigger by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var currentPositionMs by remember { mutableLongStateOf(0L) }
     var durationMs by remember { mutableLongStateOf(0L) }
     var isMuted by remember { mutableStateOf(false) }
@@ -160,14 +161,19 @@ fun SarnasVideoPlayer(
     var showDriveHelp by remember { mutableStateOf(false) }
     var showSubtitleDialog by remember { mutableStateOf(false) }
 
+    fun notifyUserInteraction() {
+        userInteractionTrigger = System.currentTimeMillis()
+        isControlsVisible = true
+    }
+
     // Subtitle tracks detected in current ExoPlayer video
     var availableSubtitleTracks by remember { mutableStateOf<List<SubtitleTrackInfo>>(emptyList()) }
     var customSubtitleUrl by remember { mutableStateOf("") }
 
-    // Auto-hide controls timer
-    LaunchedEffect(isControlsVisible, playbackState.isPlaying) {
-        if (isControlsVisible && playbackState.isPlaying && !isDraggingSlider) {
-            delay(4500)
+    // Auto-hide controls timer: hides after 3.5 seconds of user inactivity
+    LaunchedEffect(isControlsVisible, userInteractionTrigger, isDraggingSlider) {
+        if (isControlsVisible && !isDraggingSlider) {
+            delay(3500)
             isControlsVisible = false
         }
     }
@@ -363,20 +369,22 @@ fun SarnasVideoPlayer(
         }
     }
 
-    // Handle incoming synchronization updates (Play/Pause/Seek/Skip)
+    // Handle incoming synchronization updates (Play/Pause/Seek/Skip/Change)
     LaunchedEffect(playbackState.updatedAt, playbackState.isPlaying, playbackState.lastAction) {
         if (!isYouTube && activePlayUrl.isNotBlank() && exoPlayer.playbackState != Player.STATE_IDLE) {
             if (exoPlayer.playWhenReady != playbackState.isPlaying) {
                 exoPlayer.playWhenReady = playbackState.isPlaying
             }
 
-            val elapsed = if (playbackState.isPlaying) System.currentTimeMillis() - playbackState.updatedAt else 0L
+            val elapsed = if (playbackState.isPlaying) (System.currentTimeMillis() - playbackState.updatedAt).coerceAtLeast(0L) else 0L
             val expectedPos = (playbackState.positionMs + elapsed).coerceAtLeast(0L)
 
             val drift = kotlin.math.abs(exoPlayer.currentPosition - expectedPos)
-            if (drift > 1500L || playbackState.lastAction == PlaybackAction.SEEK ||
+            if (drift > 1200L || playbackState.lastAction == PlaybackAction.SEEK ||
                 playbackState.lastAction == PlaybackAction.SKIP_FORWARD ||
-                playbackState.lastAction == PlaybackAction.SKIP_BACKWARD
+                playbackState.lastAction == PlaybackAction.SKIP_BACKWARD ||
+                playbackState.lastAction == PlaybackAction.PLAY ||
+                playbackState.lastAction == PlaybackAction.CHANGE_VIDEO
             ) {
                 exoPlayer.seekTo(expectedPos)
             }
@@ -394,13 +402,23 @@ fun SarnasVideoPlayer(
         }
     }
 
-    // Periodic position updater
+    // Periodic position updater & continuous drift corrector
     LaunchedEffect(playbackState.isPlaying, isYouTube) {
         while (true) {
             if (!isYouTube && exoPlayer.playbackState == Player.STATE_READY) {
                 currentPositionMs = exoPlayer.currentPosition
                 val dur = exoPlayer.duration
                 if (dur > 0) durationMs = dur
+
+                // Continuous drift correction while playing
+                if (playbackState.isPlaying && !isDraggingSlider) {
+                    val elapsed = (System.currentTimeMillis() - playbackState.updatedAt).coerceAtLeast(0L)
+                    val expectedPos = (playbackState.positionMs + elapsed).coerceAtLeast(0L)
+                    val drift = kotlin.math.abs(exoPlayer.currentPosition - expectedPos)
+                    if (drift > 1800L) {
+                        exoPlayer.seekTo(expectedPos)
+                    }
+                }
             }
             delay(500)
         }
@@ -428,7 +446,11 @@ fun SarnasVideoPlayer(
         modifier = modifier
             .background(Color.Black)
             .clickable(interactionSource = interactionSource, indication = null) {
-                isControlsVisible = !isControlsVisible
+                if (isControlsVisible) {
+                    isControlsVisible = false
+                } else {
+                    notifyUserInteraction()
+                }
             }
             .testTag("sarnas_video_player_box"),
         contentAlignment = Alignment.Center
@@ -592,7 +614,10 @@ fun SarnasVideoPlayer(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         // Subtitles track dialog button
                         IconButton(
-                            onClick = { showSubtitleDialog = true },
+                            onClick = {
+                                notifyUserInteraction()
+                                showSubtitleDialog = true
+                            },
                             modifier = Modifier.testTag("player_subtitle_dialog_btn")
                         ) {
                             Icon(
@@ -605,6 +630,7 @@ fun SarnasVideoPlayer(
                         // CC Quick Toggle
                         IconButton(
                             onClick = {
+                                notifyUserInteraction()
                                 val nextState = !playbackState.subtitlesEnabled
                                 syncManager.toggleSubtitles(nextState)
                             },
@@ -620,6 +646,7 @@ fun SarnasVideoPlayer(
                         // Mute button
                         IconButton(
                             onClick = {
+                                notifyUserInteraction()
                                 isMuted = !isMuted
                                 exoPlayer.volume = if (isMuted) 0f else 1f
                             },
@@ -634,7 +661,10 @@ fun SarnasVideoPlayer(
 
                         // Fullscreen Toggle
                         IconButton(
-                            onClick = { toggleFullscreen() },
+                            onClick = {
+                                notifyUserInteraction()
+                                toggleFullscreen()
+                            },
                             modifier = Modifier.testTag("player_fullscreen_toggle")
                         ) {
                             Icon(
@@ -655,6 +685,7 @@ fun SarnasVideoPlayer(
                     // Rewind 10s
                     IconButton(
                         onClick = {
+                            notifyUserInteraction()
                             val newPos = (currentPositionMs - 10000L).coerceAtLeast(0L)
                             currentPositionMs = newPos
                             if (!isYouTube) exoPlayer.seekTo(newPos)
@@ -675,6 +706,7 @@ fun SarnasVideoPlayer(
                             .clip(CircleShape)
                             .background(AccentGold)
                             .clickable {
+                                notifyUserInteraction()
                                 val shouldPlay = !playbackState.isPlaying
                                 if (!isYouTube) {
                                     exoPlayer.playWhenReady = shouldPlay
@@ -699,6 +731,7 @@ fun SarnasVideoPlayer(
                     // Forward 10s
                     IconButton(
                         onClick = {
+                            notifyUserInteraction()
                             val newPos = currentPositionMs + 10000L
                             currentPositionMs = newPos
                             if (!isYouTube) exoPlayer.seekTo(newPos)
@@ -742,6 +775,7 @@ fun SarnasVideoPlayer(
                         onValueChange = { frac ->
                             isDraggingSlider = true
                             sliderProgress = frac
+                            notifyUserInteraction()
                         },
                         onValueChangeFinished = {
                             isDraggingSlider = false
@@ -749,6 +783,7 @@ fun SarnasVideoPlayer(
                             currentPositionMs = targetMs
                             if (!isYouTube) exoPlayer.seekTo(targetMs)
                             syncManager.sendSeek(targetMs)
+                            notifyUserInteraction()
                         },
                         colors = SliderDefaults.colors(
                             thumbColor = AccentGold,

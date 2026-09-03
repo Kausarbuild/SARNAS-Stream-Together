@@ -407,11 +407,18 @@ class RealtimeRoomClient(
             val json = JSONObject(raw)
             val message = deserializeMessage(json) ?: return
 
-            // Deduplication key by sender, type, and timestamp
-            val key = "${message.senderId}_${message.type}_${message.timestamp}"
+            // Deduplication key by sender, type, and specific payload details (ensuring ICE candidates are never dropped)
+            val key = when (message.type) {
+                "WEBRTC_ICE_CANDIDATE" ->
+                    "${message.senderId}_ICE_${message.iceCandidateSdp?.hashCode()}_${message.iceCandidateSdpMLineIndex}_${message.timestamp}"
+                "WEBRTC_OFFER", "WEBRTC_ANSWER" ->
+                    "${message.senderId}_${message.type}_${message.sdpDescription?.hashCode()}_${message.timestamp}"
+                else ->
+                    "${message.senderId}_${message.type}_${message.timestamp}"
+            }
             if (processedMessageKeys.contains(key)) return
 
-            if (processedMessageKeys.size > 500) {
+            if (processedMessageKeys.size > 2000) {
                 processedMessageKeys.clear()
             }
             processedMessageKeys.add(key)

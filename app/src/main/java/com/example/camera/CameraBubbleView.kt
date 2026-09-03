@@ -260,11 +260,16 @@ fun WebRtcSurfaceRenderer(
                 setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                 setEnableHardwareScaler(true)
                 setMirror(isMirror)
+                setZOrderMediaOverlay(true)
                 videoTrack.addSink(this)
             }
         },
         update = { renderer ->
             renderer.setMirror(isMirror)
+            renderer.setZOrderMediaOverlay(true)
+            try {
+                videoTrack.addSink(renderer)
+            } catch (e: Exception) {}
         },
         onRelease = { renderer ->
             try {

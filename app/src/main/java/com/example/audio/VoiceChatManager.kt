@@ -101,10 +101,21 @@ class VoiceChatManager(
                 udpSocket = socket
                 val buffer = ByteArray(2048)
 
+                val myLocalAddrs = java.net.NetworkInterface.getNetworkInterfaces().toList()
+                    .flatMap { it.inetAddresses.toList() }
+                    .map { it.hostAddress }
+                    .toSet()
+
                 while (isActive) {
                     try {
                         val packet = DatagramPacket(buffer, buffer.size)
                         socket.receive(packet)
+                        val senderHost = packet.address.hostAddress
+                        // CRITICAL: Filter out own packets to prevent microphone echo/feedback loop
+                        if (senderHost != null && (myLocalAddrs.contains(senderHost) || packet.address.isLoopbackAddress)) {
+                            continue
+                        }
+
                         if (packet.length > 0) {
                             val audioData = ByteArray(packet.length)
                             System.arraycopy(packet.data, 0, audioData, 0, packet.length)

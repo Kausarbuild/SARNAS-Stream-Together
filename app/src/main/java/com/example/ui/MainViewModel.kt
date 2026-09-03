@@ -4,9 +4,12 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.Friend
+import com.example.data.FriendRequest
+import com.example.data.RoomInvite
 import com.example.data.SavedRoom
 import com.example.data.UserProfile
 import com.example.data.UserRepository
+import com.example.sync.FriendSyncClient
 import com.example.sync.RoomSyncManager
 import com.example.sync.RoomVerificationResult
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +38,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val friends: StateFlow<List<Friend>> = repository.friendsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val pendingFriendRequests: StateFlow<List<FriendRequest>> = repository.pendingRequestsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val friendSyncClient = FriendSyncClient.getInstance(application)
+    val incomingInvites = friendSyncClient.incomingInvites
+
     val savedRooms: StateFlow<List<SavedRoom>> = repository.savedRoomsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -45,6 +54,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         syncManager.initContext(application)
         viewModelScope.launch {
             repository.userProfileFlow.collect { profile ->
+                if (profile != null) {
+                    friendSyncClient.start(profile)
+                }
                 if (_currentScreen.value == AppScreen.LOADING) {
                     if (profile == null) {
                         _currentScreen.value = AppScreen.INITIAL_PROFILE
@@ -58,16 +70,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveProfile(name: String, avatarUri: String?, colorHex: String) {
         viewModelScope.launch {
-            val profile = repository.saveProfile(name, avatarUri, colorHex)
+            val profile = repository.saveProfile(name, avatarUri = avatarUri, colorHex = colorHex)
+            friendSyncClient.start(profile)
             if (_currentScreen.value == AppScreen.INITIAL_PROFILE) {
                 _currentScreen.value = AppScreen.HOME
             }
         }
     }
 
+    fun searchUser(username: String, onResult: (UserProfile?) -> Unit) {
+        viewModelScope.launch {
+            val result = friendSyncClient.searchUserByUsername(username)
+            onResult(result)
+        }
+    }
+
+    fun sendFriendRequest(recipient: UserProfile, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val result = friendSyncClient.sendFriendRequest(recipient)
+            if (result.isSuccess) {
+                onResult(true, result.getOrNull() ?: "Friend request sent!")
+            } else {
+                onResult(false, result.exceptionOrNull()?.message ?: "Failed to send request")
+            }
+        }
+    }
+
+    fun acceptFriendRequest(request: FriendRequest) {
+        viewModelScope.launch {
+            friendSyncClient.acceptFriendRequest(request)
+        }
+    }
+
+    fun declineFriendRequest(requestId: String) {
+        viewModelScope.launch {
+            friendSyncClient.declineFriendRequest(requestId)
+        }
+    }
+
+    fun sendRoomInvite(friend: Friend, roomId: String, roomTitle: String) {
+        viewModelScope.launch {
+            friendSyncClient.sendRoomInvite(friend, roomId, roomTitle)
+        }
+    }
+
     fun addFriend(name: String, colorHex: String) {
         viewModelScope.launch {
-            repository.addFriend(name = name, colorHex = colorHex)
+            val username = name.trim().lowercase().filter { it.isLetterOrDigit() }
+            repository.addFriend(id = UUID.randomUUID().toString(), username = username, name = name, colorHex = colorHex)
         }
     }
 

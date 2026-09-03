@@ -20,6 +20,7 @@ import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.MediaStreamTrack
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
@@ -32,6 +33,7 @@ import org.webrtc.VideoCapturer
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 data class RemotePeerMedia(
     val peerId: String,
@@ -78,6 +80,7 @@ class WebRtcManager(
         private set
 
     private val peerConnections = ConcurrentHashMap<String, PeerConnection>()
+    private val pendingIceCandidates = ConcurrentHashMap<String, ConcurrentLinkedQueue<IceCandidate>>()
     private val _remotePeers = MutableStateFlow<Map<String, RemotePeerMedia>>(emptyMap())
     val remotePeers: StateFlow<Map<String, RemotePeerMedia>> = _remotePeers.asStateFlow()
 
@@ -272,7 +275,9 @@ class WebRtcManager(
         val remoteSdp = SessionDescription(SessionDescription.Type.OFFER, sdpDescription)
         pc.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
-                Log.d(tag, "Remote offer set successfully, creating answer for: $senderId")
+                Log.d(tag, "Remote offer set successfully, draining ICE & creating answer for: $senderId")
+                drainQueuedIceCandidates(senderId, pc)
+
                 val mediaConstraints = MediaConstraints().apply {
                     mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
                     mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "true"))
@@ -308,13 +313,16 @@ class WebRtcManager(
         val remoteSdp = SessionDescription(SessionDescription.Type.ANSWER, sdpDescription)
         pc.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
-                Log.d(tag, "Remote answer applied successfully for peer: $senderId")
+                Log.d(tag, "Remote answer applied successfully for peer: $senderId, draining ICE candidates")
+                drainQueuedIceCandidates(senderId, pc)
             }
         }, remoteSdp)
     }
 
     /**
      * Handles incoming ICE Candidate from remote peer.
+     * If the peer connection or its remote description is not ready yet,
+     * the candidate is safely buffered in pendingIceCandidates and applied when ready.
      */
     fun handleRemoteIceCandidate(
         senderId: String,
@@ -323,10 +331,28 @@ class WebRtcManager(
         sdpMLineIndex: Int
     ) {
         if (senderId == myUserId) return
-        val pc = peerConnections[senderId] ?: return
         val candidate = IceCandidate(sdpMid ?: "0", sdpMLineIndex, sdp)
-        pc.addIceCandidate(candidate)
-        Log.d(tag, "Added remote ICE candidate from: $senderId")
+        val pc = peerConnections[senderId]
+        if (pc != null && pc.remoteDescription != null) {
+            pc.addIceCandidate(candidate)
+            Log.d(tag, "Added direct remote ICE candidate from: $senderId")
+        } else {
+            pendingIceCandidates.getOrPut(senderId) { ConcurrentLinkedQueue() }.add(candidate)
+            Log.d(tag, "Queued remote ICE candidate from: $senderId (waiting for remote description)")
+        }
+    }
+
+    private fun drainQueuedIceCandidates(peerId: String, pc: PeerConnection) {
+        val queue = pendingIceCandidates[peerId] ?: return
+        var count = 0
+        while (queue.isNotEmpty()) {
+            val cand = queue.poll() ?: break
+            pc.addIceCandidate(cand)
+            count++
+        }
+        if (count > 0) {
+            Log.d(tag, "Drained and applied $count queued ICE candidates for peer: $peerId")
+        }
     }
 
     private fun getOrCreatePeerConnection(peerId: String): PeerConnection {
@@ -344,6 +370,7 @@ class WebRtcManager(
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
         }
 
+        var pcRef: PeerConnection? = null
         val observer = object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState?) {
                 Log.d(tag, "Peer [$peerId] signaling state: $state")
@@ -411,6 +438,14 @@ class WebRtcManager(
 
             override fun onRenegotiationNeeded() {
                 Log.d(tag, "Peer [$peerId] renegotiation needed")
+                try {
+                    val conn = pcRef
+                    if (conn != null && conn.signalingState() == PeerConnection.SignalingState.STABLE) {
+                        initiateCallToPeer(peerId)
+                    }
+                } catch (e: Exception) {
+                    Log.w(tag, "Error handling renegotiation: ${e.message}")
+                }
             }
 
             override fun onTrack(transceiver: RtpTransceiver?) {
@@ -436,6 +471,13 @@ class WebRtcManager(
 
         val pc = f.createPeerConnection(rtcConfig, observer)
             ?: throw IllegalStateException("Failed to create PeerConnection")
+        pcRef = pc
+
+        // Explicitly configure transceivers for two-way audio and video
+        try {
+            pc.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV))
+            pc.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_VIDEO, RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_RECV))
+        } catch (e: Exception) {}
 
         // Attach local tracks
         localAudioTrack?.let {

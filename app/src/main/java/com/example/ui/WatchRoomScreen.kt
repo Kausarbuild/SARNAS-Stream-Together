@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -66,6 +67,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -128,6 +130,7 @@ fun WatchRoomScreen(
     currentUser: UserProfile,
     friends: List<Friend>,
     syncManager: RoomSyncManager,
+    onSendRoomInvite: ((Friend, String, String) -> Unit)? = null,
     onLeaveRoom: () -> Unit
 ) {
     val context = LocalContext.current
@@ -152,6 +155,17 @@ fun WatchRoomScreen(
     var activeSyncBanner by remember { mutableStateOf<SyncNotification?>(null) }
     var isFullscreenActive by remember { mutableStateOf(false) }
     var reactionsList by remember { mutableStateOf<List<FloatingReaction>>(emptyList()) }
+
+    BackHandler {
+        syncManager.leaveRoom()
+        onLeaveRoom()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            syncManager.leaveRoom()
+        }
+    }
 
     // Collect Real-time reactions
     LaunchedEffect(Unit) {
@@ -620,8 +634,8 @@ fun WatchRoomScreen(
             friends = friends,
             currentParticipants = participants,
             onInviteFriend = { friend ->
-                // Share/Invite
-                Toast.makeText(context, "Inviting ${friend.name} with room code $roomId", Toast.LENGTH_SHORT).show()
+                onSendRoomInvite?.invoke(friend, roomId, roomTitle)
+                Toast.makeText(context, "Invited ${friend.name} to $roomTitle", Toast.LENGTH_SHORT).show()
                 showInviteSheet = false
             },
             onDismiss = { showInviteSheet = false }

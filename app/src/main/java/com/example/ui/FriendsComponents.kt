@@ -21,14 +21,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,6 +61,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.example.data.Friend
+import com.example.data.FriendRequest
+import com.example.data.UserProfile
 import com.example.ui.theme.AccentCyan
 import com.example.ui.theme.AccentGold
 import com.example.ui.theme.DarkBackground
@@ -68,10 +73,20 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.TextTertiary
 
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.TextButton
+import androidx.compose.material.icons.filled.PersonRemove
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FriendsBottomSheet(
     friends: List<Friend>,
+    pendingRequests: List<FriendRequest> = emptyList(),
+    onAcceptRequest: (FriendRequest) -> Unit = {},
+    onDeclineRequest: (String) -> Unit = {},
+    onSearchUser: ((String, (UserProfile?) -> Unit) -> Unit)? = null,
+    onSendFriendRequest: ((UserProfile, (Boolean, String) -> Unit) -> Unit)? = null,
     onAddFriend: (name: String, colorHex: String) -> Unit,
     onRemoveFriend: (String) -> Unit,
     onInviteToRoom: ((Friend) -> Unit)? = null,
@@ -142,11 +157,44 @@ fun FriendsBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Pending Friend Requests Section
+            if (pendingRequests.isNotEmpty()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                ) {
+                    Text(
+                        text = "Friend Requests (${pendingRequests.size})",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = AccentGold
+                        )
+                    )
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 160.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(pendingRequests, key = { it.requestId }) { req ->
+                        FriendRequestItemRow(
+                            request = req,
+                            onAccept = { onAcceptRequest(req) },
+                            onDecline = { onDeclineRequest(req.requestId) }
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                HorizontalDivider(color = DarkBorder, thickness = 1.dp)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
             if (friends.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 40.dp),
+                        .padding(vertical = 30.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -154,12 +202,12 @@ fun FriendsBottomSheet(
                             text = "No friends added yet",
                             style = MaterialTheme.typography.bodyLarge.copy(color = TextSecondary)
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Add friends to easily invite them into watch rooms",
+                            text = "Search by @username to connect and watch together",
                             style = MaterialTheme.typography.bodySmall.copy(color = TextTertiary)
                         )
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(18.dp))
                         Button(
                             onClick = { isAddingFriend = true },
                             colors = ButtonDefaults.buttonColors(
@@ -171,7 +219,7 @@ fun FriendsBottomSheet(
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Add First Friend", style = MaterialTheme.typography.labelLarge)
+                            Text("Find Friends", style = MaterialTheme.typography.labelLarge)
                         }
                     }
                 }
@@ -194,12 +242,92 @@ fun FriendsBottomSheet(
 
     if (isAddingFriend) {
         AddFriendDialog(
+            onSearchUser = onSearchUser,
+            onSendFriendRequest = onSendFriendRequest,
             onAdd = { name, colorHex ->
                 onAddFriend(name, colorHex)
                 isAddingFriend = false
             },
             onDismiss = { isAddingFriend = false }
         )
+    }
+}
+
+@Composable
+fun FriendRequestItemRow(
+    request: FriendRequest,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit
+) {
+    Surface(
+        color = DarkSurfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AccentGold.copy(alpha = 0.3f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(
+                        try {
+                            Color(android.graphics.Color.parseColor(request.requesterAvatarColorHex)).copy(alpha = 0.25f)
+                        } catch (e: Exception) {
+                            AccentCyan.copy(alpha = 0.25f)
+                        }
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = request.requesterDisplayName.take(1).uppercase(),
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = request.requesterDisplayName,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                )
+                Text(
+                    text = "@${request.requesterUsername}",
+                    style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary, fontSize = 11.sp)
+                )
+            }
+
+            Button(
+                onClick = onAccept,
+                colors = ButtonDefaults.buttonColors(containerColor = AccentGold, contentColor = DarkBackground),
+                shape = RoundedCornerShape(8.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                modifier = Modifier.height(32.dp)
+            ) {
+                Text("Accept", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+            }
+
+            Spacer(modifier = Modifier.width(6.dp))
+
+            IconButton(
+                onClick = onDecline,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "Decline", tint = TextTertiary, modifier = Modifier.size(16.dp))
+            }
+        }
     }
 }
 
@@ -328,12 +456,23 @@ fun FriendItemRow(
 
 @Composable
 fun AddFriendDialog(
+    onSearchUser: ((String, (UserProfile?) -> Unit) -> Unit)? = null,
+    onSendFriendRequest: ((UserProfile, (Boolean, String) -> Unit) -> Unit)? = null,
     onAdd: (name: String, colorHex: String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var searchUsername by remember { mutableStateOf("") }
+    var isSearching by remember { mutableStateOf(false) }
+    var searchResult by remember { mutableStateOf<UserProfile?>(null) }
+    var searchMessage by remember { mutableStateOf<String?>(null) }
+    var requestStatusMessage by remember { mutableStateOf<String?>(null) }
+    var isRequestSuccess by remember { mutableStateOf(false) }
+    var showManualAdd by remember { mutableStateOf(false) }
+
     var friendName by remember { mutableStateOf("") }
     var selectedColor by remember { mutableStateOf(AVATAR_PALETTES.random()) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var manualError by remember { mutableStateOf<String?>(null) }
+
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
@@ -387,84 +526,293 @@ fun AddFriendDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                OutlinedTextField(
-                    value = friendName,
-                    onValueChange = {
-                        friendName = it
-                        error = null
-                    },
-                    label = { Text("Friend's Name") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = AccentGold,
-                        unfocusedBorderColor = DarkBorder,
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedContainerColor = DarkSurfaceVariant,
-                        unfocusedContainerColor = DarkSurfaceVariant
-                    ),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth().testTag("add_friend_name_input")
+                // Real username search
+                Text(
+                    text = "Search for a user by their unique @username",
+                    style = MaterialTheme.typography.bodySmall.copy(color = TextSecondary),
+                    modifier = Modifier.fillMaxWidth()
                 )
 
-                if (error != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = searchUsername,
+                        onValueChange = {
+                            searchUsername = it
+                            searchMessage = null
+                            requestStatusMessage = null
+                        },
+                        placeholder = { Text("e.g. alice", color = TextTertiary) },
+                        prefix = { Text("@", color = AccentGold, fontWeight = FontWeight.Bold) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentGold,
+                            unfocusedBorderColor = DarkBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedContainerColor = DarkSurfaceVariant,
+                            unfocusedContainerColor = DarkSurfaceVariant
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("search_username_input")
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = {
+                            val query = searchUsername.trim().removePrefix("@")
+                            if (query.isNotBlank() && onSearchUser != null) {
+                                isSearching = true
+                                searchResult = null
+                                searchMessage = null
+                                requestStatusMessage = null
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+
+                                onSearchUser(query) { result ->
+                                    isSearching = false
+                                    if (result != null) {
+                                        searchResult = result
+                                    } else {
+                                        searchMessage = "User not found"
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !isSearching && searchUsername.trim().isNotBlank(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AccentGold,
+                            contentColor = DarkBackground
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .height(54.dp)
+                            .testTag("search_user_button")
+                    ) {
+                        if (isSearching) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = DarkBackground,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(Icons.Default.Search, contentDescription = "Search", modifier = Modifier.size(20.dp))
+                        }
+                    }
+                }
+
+                if (searchMessage != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = error ?: "",
+                        text = searchMessage ?: "",
                         style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                // Search Result Card
+                searchResult?.let { user ->
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Surface(
+                        color = DarkSurfaceVariant,
+                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, AccentGold.copy(alpha = 0.4f)),
+                        modifier = Modifier.fillMaxWidth().testTag("user_search_result_card")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            try {
+                                                Color(android.graphics.Color.parseColor(user.avatarColorHex)).copy(alpha = 0.25f)
+                                            } catch (e: Exception) {
+                                                AccentCyan.copy(alpha = 0.25f)
+                                            }
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = user.name.take(1).uppercase(),
+                                        style = MaterialTheme.typography.titleMedium.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                    )
+                                }
 
-                // Color picker
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AVATAR_PALETTES.forEach { hex ->
-                        val isSelected = selectedColor == hex
-                        val color = Color(android.graphics.Color.parseColor(hex))
-                        Box(
-                            modifier = Modifier
-                                .size(26.dp)
-                                .clip(CircleShape)
-                                .background(color)
-                                .border(
-                                    width = if (isSelected) 2.dp else 0.dp,
-                                    color = if (isSelected) TextPrimary else Color.Transparent,
-                                    shape = CircleShape
-                                )
-                                .clickable { selectedColor = hex }
-                        )
+                                Spacer(modifier = Modifier.width(12.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = user.name,
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                    )
+                                    Text(
+                                        text = "@${user.username}",
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = TextSecondary,
+                                            fontSize = 12.sp
+                                        )
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            if (isRequestSuccess) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFF2AC28A), modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = requestStatusMessage ?: "Friend request sent!",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF2AC28A))
+                                    )
+                                }
+                            } else {
+                                Button(
+                                    onClick = {
+                                        onSendFriendRequest?.invoke(user) { success, msg ->
+                                            isRequestSuccess = success
+                                            requestStatusMessage = msg
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = AccentGold,
+                                        contentColor = DarkBackground
+                                    ),
+                                    shape = RoundedCornerShape(10.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(40.dp)
+                                        .testTag("send_friend_request_btn")
+                                ) {
+                                    Icon(Icons.Default.PersonAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Send Friend Request", style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                                }
+
+                                if (requestStatusMessage != null) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = requestStatusMessage ?: "",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                Button(
-                    onClick = {
-                        if (friendName.trim().isBlank()) {
-                            error = "Please enter a name"
-                        } else {
-                            focusManager.clearFocus()
-                            keyboardController?.hide()
-                            onAdd(friendName.trim(), selectedColor)
-                        }
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AccentGold,
-                        contentColor = DarkBackground
-                    ),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("confirm_add_friend_btn")
+                // Toggle for quick manual/offline addition
+                TextButton(
+                    onClick = { showManualAdd = !showManualAdd }
                 ) {
-                    Text("Add Friend", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    Text(
+                        text = if (showManualAdd) "Hide manual entry" else "Add friend locally without @username",
+                        style = MaterialTheme.typography.bodySmall.copy(color = TextTertiary, fontSize = 12.sp)
+                    )
+                }
+
+                if (showManualAdd) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = friendName,
+                        onValueChange = {
+                            friendName = it
+                            manualError = null
+                        },
+                        label = { Text("Friend's Name") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentGold,
+                            unfocusedBorderColor = DarkBorder,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                            focusedContainerColor = DarkSurfaceVariant,
+                            unfocusedContainerColor = DarkSurfaceVariant
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("add_friend_name_input")
+                    )
+
+                    if (manualError != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = manualError ?: "",
+                            style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        AVATAR_PALETTES.forEach { hex ->
+                            val isSelected = selectedColor == hex
+                            val color = Color(android.graphics.Color.parseColor(hex))
+                            Box(
+                                modifier = Modifier
+                                    .size(26.dp)
+                                    .clip(CircleShape)
+                                    .background(color)
+                                    .border(
+                                        width = if (isSelected) 2.dp else 0.dp,
+                                        color = if (isSelected) TextPrimary else Color.Transparent,
+                                        shape = CircleShape
+                                    )
+                                    .clickable { selectedColor = hex }
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            if (friendName.trim().isBlank()) {
+                                manualError = "Please enter a name"
+                            } else {
+                                focusManager.clearFocus()
+                                keyboardController?.hide()
+                                onAdd(friendName.trim(), selectedColor)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AccentGold,
+                            contentColor = DarkBackground
+                        ),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .testTag("confirm_add_friend_btn")
+                    ) {
+                        Text("Add Locally", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold))
+                    }
                 }
             }
         }

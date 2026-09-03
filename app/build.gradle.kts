@@ -106,6 +106,7 @@ dependencies {
   implementation(libs.media3.ui)
   implementation(libs.media3.common)
   implementation(libs.converter.moshi)
+  implementation(libs.stream.webrtc)
   implementation(libs.firebase.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)

@@ -47,5 +47,13 @@ data class RealtimeMessage(
     val emoji: String? = null,
     val videoFrameBase64: String? = null,
     val audioPacketBase64: String? = null,
+    val targetUserId: String? = null,
+    val sdpType: String? = null,
+    val sdpDescription: String? = null,
+    val iceCandidateSdp: String? = null,
+    val iceCandidateSdpMid: String? = null,
+    val iceCandidateSdpMLineIndex: Int? = null,
+    val creatorId: String? = null,
+    val createdAt: Long? = null,
     val timestamp: Long = System.currentTimeMillis()
 )

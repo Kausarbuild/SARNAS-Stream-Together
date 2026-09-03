@@ -135,6 +135,9 @@ fun WatchRoomScreen(
     val connectionState by syncManager.connectionState.collectAsStateWithLifecycle()
     val chatMessages by syncManager.chatMessages.collectAsStateWithLifecycle()
     val peerVideoFrames by syncManager.peerVideoFrames.collectAsStateWithLifecycle()
+    val remotePeers by syncManager.remotePeers.collectAsStateWithLifecycle()
+    val localVideoTrack = syncManager.getLocalVideoTrack()
+    val eglBase = syncManager.getEglBase()
 
     var showChangeVideoDialog by remember { mutableStateOf(false) }
     var showInviteSheet by remember { mutableStateOf(false) }
@@ -500,6 +503,9 @@ fun WatchRoomScreen(
                 isCameraEnabled = isCameraEnabled,
                 isMicrophoneEnabled = isMicrophoneEnabled,
                 peerVideoFrames = peerVideoFrames,
+                remotePeers = remotePeers,
+                localVideoTrack = localVideoTrack,
+                eglBase = eglBase,
                 onFrameCaptured = { jpegBytes ->
                     syncManager.broadcastCameraFrame(jpegBytes)
                 }

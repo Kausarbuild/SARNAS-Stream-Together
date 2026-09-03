@@ -42,9 +42,10 @@ googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
 media3 = "1.5.1"
-
+webrtc = "1.3.1"
 
 [libraries]
+stream-webrtc = { group = "io.getstream", name = "stream-webrtc-android", version.ref = "webrtc" }
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 media3-exoplayer-hls = { group = "androidx.media3", name = "media3-exoplayer-hls", version.ref = "media3" }
 media3-exoplayer-dash = { group = "androidx.media3", name = "media3-exoplayer-dash", version.ref = "media3" }

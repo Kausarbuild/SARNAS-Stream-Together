@@ -42,6 +42,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val currentScreen: StateFlow<AppScreen> = _currentScreen.asStateFlow()
 
     init {
+        syncManager.initContext(application)
         viewModelScope.launch {
             repository.userProfileFlow.collect { profile ->
                 if (_currentScreen.value == AppScreen.LOADING) {

@@ -26,6 +26,7 @@ import java.net.Socket
 import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 
 sealed class RoomVerificationResult {
@@ -38,10 +39,13 @@ sealed class RoomVerificationResult {
  * Enterprise-grade Realtime Room Transport:
  * 1. Ultra-low-latency, bidirectional MQTT protocol engine over TCP socket.
  * 2. Primary broker: broker.emqx.io:1883, automatic fallback to broker.hivemq.com:1883.
- * 3. Retained room metadata on cloud broker for instant, bulletproof room verification.
- * 4. Dual-transport: Local LAN UDP broadcast (port 8989) alongside cloud broker for sub-millisecond local sync.
- * 5. Persistent keep-alive ping loop and automatic reconnection with backoff.
- * 6. High-throughput support for live video frames and voice packets with zero rate-limiting.
+ * 3. Outgoing packet queue: messages queued while connecting/reconnecting are guaranteed
+ *    never to be dropped and are immediately dispatched upon socket handshake.
+ * 4. Retained room metadata and playback state on cloud broker for instant room verification
+ *    and instant initial synchronization when new peers join.
+ * 5. WebRTC signaling channel for direct P2P video & audio negotiation.
+ * 6. Dual-transport: Local LAN UDP broadcast alongside cloud broker for sub-millisecond local sync.
+ * 7. Persistent keep-alive ping loop and automatic reconnection with backoff.
  */
 class RealtimeRoomClient(
     private val onMessageReceived: (RealtimeMessage) -> Unit
@@ -54,8 +58,10 @@ class RealtimeRoomClient(
     private val mqttPort = 1883
 
     private var activeSocket: Socket? = null
+    @Volatile
     private var socketOutputStream: OutputStream? = null
     private var connectionJob: Job? = null
+    private var writerJob: Job? = null
     private var pingJob: Job? = null
     private var lanListenerJob: Job? = null
     private var lanSocket: DatagramSocket? = null
@@ -64,6 +70,15 @@ class RealtimeRoomClient(
     @Volatile
     private var isIntentionalClose = false
     private val packetIdCounter = AtomicInteger(1)
+
+    // Guaranteed outgoing queue so messages sent during connect/handshake are never dropped
+    private val outgoingQueue = ConcurrentLinkedQueue<ByteArray>()
+
+    // Retained message caches so reconnected sockets immediately re-assert authoritative state
+    @Volatile
+    private var lastRetainedAnnounce: ByteArray? = null
+    @Volatile
+    private var lastRetainedPlayback: ByteArray? = null
 
     // Message deduplication cache to prevent echoes and dual-transport duplicates
     private val processedMessageKeys = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -102,7 +117,6 @@ class RealtimeRoomClient(
                     activeSocket = socket
                     val output = socket.getOutputStream()
                     val input = socket.getInputStream()
-                    socketOutputStream = output
 
                     // 1. Send CONNECT packet
                     val clientId = "sarnas_${UUID.randomUUID().toString().take(10)}"
@@ -116,6 +130,7 @@ class RealtimeRoomClient(
                     }
 
                     Log.d(tag, "MQTT connected to $targetHost!")
+                    socketOutputStream = output
                     _connectionState.value = ConnectionState.CONNECTED
 
                     // 3. Subscribe to all room topics: sarnas/v2/rooms/$roomId/#
@@ -123,10 +138,16 @@ class RealtimeRoomClient(
                     output.write(encodeSubscribe(wildcardTopic, nextPacketId()))
                     output.flush()
 
-                    // Start background keepalive ping loop
+                    // 4. Immediately flush any retained room announcement and playback state
+                    lastRetainedAnnounce?.let { output.write(it) }
+                    lastRetainedPlayback?.let { output.write(it) }
+                    output.flush()
+
+                    // 5. Start background outgoing packet writer and keepalive ping loop
+                    startWriterLoop(output)
                     startPingLoop(output)
 
-                    // 4. Reading loop for incoming MQTT packets
+                    // 6. Reading loop for incoming MQTT packets
                     while (isActive && !isIntentionalClose) {
                         val headerByte = input.read()
                         if (headerByte == -1) {
@@ -151,12 +172,37 @@ class RealtimeRoomClient(
                     }
                 } catch (e: Exception) {
                     if (!isIntentionalClose) {
-                        Log.w(tag, "MQTT connection interrupted (${e.message}), reconnecting in 2s...")
+                        Log.w(tag, "MQTT connection interrupted (${e.message}), reconnecting in 1.5s...")
                         _connectionState.value = ConnectionState.CONNECTING
                         cleanupSocket()
-                        delay(2000)
+                        delay(1500)
                     }
                 }
+            }
+        }
+    }
+
+    private fun startWriterLoop(output: OutputStream) {
+        writerJob?.cancel()
+        writerJob = scope.launch(Dispatchers.IO) {
+            while (isActive && !isIntentionalClose && socketOutputStream != null) {
+                var sentCount = 0
+                while (outgoingQueue.isNotEmpty()) {
+                    val packet = outgoingQueue.poll() ?: break
+                    try {
+                        output.write(packet)
+                        sentCount++
+                    } catch (e: Exception) {
+                        Log.w(tag, "Error writing packet from queue: ${e.message}")
+                        // Re-queue packet if failed
+                        outgoingQueue.offer(packet)
+                        throw e
+                    }
+                }
+                if (sentCount > 0) {
+                    try { output.flush() } catch (e: Exception) {}
+                }
+                delay(12)
             }
         }
     }
@@ -166,7 +212,7 @@ class RealtimeRoomClient(
         pingJob = scope.launch(Dispatchers.IO) {
             val pingPacket = byteArrayOf(0xC0.toByte(), 0x00)
             while (isActive && !isIntentionalClose) {
-                delay(25000)
+                delay(20000)
                 try {
                     synchronized(this@RealtimeRoomClient) {
                         output.write(pingPacket)
@@ -208,7 +254,7 @@ class RealtimeRoomClient(
                         val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
                         handleIncomingRaw(raw)
                     } catch (e: java.net.SocketTimeoutException) {
-                        // Timeout normal in receive loop
+                        // Normal in receive loop
                     } catch (e: Exception) {
                         if (!isActive || isIntentionalClose) break
                     }
@@ -222,45 +268,59 @@ class RealtimeRoomClient(
     /**
      * Broadcasts a real-time message to all devices in the room:
      * - Instant local broadcast via UDP on 255.255.255.255:8989.
-     * - Reliable cloud broadcast via persistent MQTT socket.
-     * - Retains ROOM_ANNOUNCE on cloud broker so joining peers verify room instantly.
+     * - Reliable cloud broadcast via persistent MQTT socket with guaranteed queueing.
+     * - Retains ROOM_ANNOUNCE and PLAYBACK on cloud broker so joining peers verify room instantly.
      */
     fun broadcast(message: RealtimeMessage) {
         val cleanRoomId = currentRoomId ?: message.roomId.trim().uppercase()
         val jsonString = serializeMessage(message)
         val jsonBytes = jsonString.toByteArray(Charsets.UTF_8)
 
+        // Determine destination topic and whether to retain state
+        val isRetainMeta = message.type == "ROOM_ANNOUNCE"
+        val isRetainPlayback = message.type == "SYNC_STATE" || message.type == "PLAY" ||
+                message.type == "PAUSE" || message.type == "SEEK" || message.type == "CHANGE_VIDEO"
+
+        val topic = when {
+            isRetainMeta -> "sarnas/v2/rooms/$cleanRoomId/meta"
+            isRetainPlayback -> "sarnas/v2/rooms/$cleanRoomId/playback"
+            message.targetUserId != null -> "sarnas/v2/rooms/$cleanRoomId/signal/${message.targetUserId}"
+            else -> "sarnas/v2/rooms/$cleanRoomId/events"
+        }
+
+        val isRetain = isRetainMeta || isRetainPlayback
+        val publishPacket = encodePublish(topic, jsonBytes, retain = isRetain)
+
+        if (isRetainMeta) {
+            lastRetainedAnnounce = publishPacket
+        } else if (isRetainPlayback) {
+            lastRetainedPlayback = publishPacket
+        }
+
+        // 1. Enqueue to guaranteed outgoing queue
+        outgoingQueue.offer(publishPacket)
+
+        // 2. Also immediately attempt direct write if socket is ready
+        socketOutputStream?.let { out ->
+            scope.launch(Dispatchers.IO) {
+                try {
+                    synchronized(this@RealtimeRoomClient) {
+                        out.write(publishPacket)
+                        out.flush()
+                    }
+                } catch (e: Exception) {}
+            }
+        }
+
+        // 3. Local LAN UDP Broadcast (for ultra-fast sync on same Wi-Fi / Hotspot)
         scope.launch(Dispatchers.IO) {
-            // A. Local LAN UDP Broadcast (Sub-millisecond latency when on same Wi-Fi / Hotspot)
             try {
                 val broadcastAddr = InetAddress.getByName("255.255.255.255")
                 val sendSocket = DatagramSocket().apply { broadcast = true }
                 val packet = DatagramPacket(jsonBytes, jsonBytes.size, broadcastAddr, 8989)
                 sendSocket.send(packet)
                 sendSocket.close()
-            } catch (e: Exception) {
-                // Non-fatal if local broadcast is blocked
-            }
-
-            // B. MQTT Cloud Broadcast
-            try {
-                val isRetain = message.type == "ROOM_ANNOUNCE"
-                val topic = if (isRetain) {
-                    "sarnas/v2/rooms/$cleanRoomId/meta"
-                } else {
-                    "sarnas/v2/rooms/$cleanRoomId/events"
-                }
-
-                val publishPacket = encodePublish(topic, jsonBytes, retain = isRetain)
-                synchronized(this@RealtimeRoomClient) {
-                    socketOutputStream?.let { out ->
-                        out.write(publishPacket)
-                        out.flush()
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(tag, "Failed to send MQTT packet: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
     }
 
@@ -280,32 +340,32 @@ class RealtimeRoomClient(
             try {
                 verifySocket = Socket()
                 verifySocket.tcpNoDelay = true
-                verifySocket.soTimeout = 2500
+                verifySocket.soTimeout = 3000
                 verifySocket.connect(InetSocketAddress(host, mqttPort), 3000)
 
                 val out = verifySocket.getOutputStream()
                 val inStream = verifySocket.getInputStream()
 
-                // Connect
+                // 1. Connect
                 val cid = "sarnas_verify_${UUID.randomUUID().toString().take(8)}"
                 out.write(encodeConnect(cid))
                 out.flush()
 
-                // Read CONNACK
+                // 2. Read CONNACK
                 val connack = readExact(inStream, 4)
                 if (connack[0] != 0x20.toByte() || connack[3] != 0x00.toByte()) {
                     verifySocket.close()
                     continue
                 }
 
-                // Subscribe to retained meta topic: sarnas/v2/rooms/$cleanRoomId/meta
-                val metaTopic = "sarnas/v2/rooms/$cleanRoomId/meta"
+                // 3. Subscribe to retained meta and playback topics
+                val metaTopic = "sarnas/v2/rooms/$cleanRoomId/#"
                 out.write(encodeSubscribe(metaTopic, 1))
                 out.flush()
 
-                // Await retained message
+                // 4. Await retained message
                 val startTime = System.currentTimeMillis()
-                while (System.currentTimeMillis() - startTime < 2500) {
+                while (System.currentTimeMillis() - startTime < 3500) {
                     val headerByte = inStream.read()
                     if (headerByte == -1) break
 
@@ -321,15 +381,13 @@ class RealtimeRoomClient(
                             try {
                                 val obj = JSONObject(payload)
                                 val msgType = obj.optString("type", "")
-                                if (msgType == "ROOM_ANNOUNCE" || obj.has("roomId")) {
+                                if (msgType == "ROOM_ANNOUNCE" || obj.has("roomId") || obj.has("creatorId") || obj.has("videoUrl")) {
                                     val rName = obj.optString("videoTitle", obj.optString("roomName", "Watch Room ($cleanRoomId)"))
-                                    val hName = obj.optString("senderName", "Host")
+                                    val hName = obj.optString("creatorName", obj.optString("senderName", "Host"))
                                     verifySocket.close()
                                     return@withContext RoomVerificationResult.Found(cleanRoomId, rName, hName)
                                 }
-                            } catch (e: Exception) {
-                                // Parse next packet
-                            }
+                            } catch (e: Exception) {}
                         }
                     }
                 }
@@ -353,25 +411,25 @@ class RealtimeRoomClient(
             val key = "${message.senderId}_${message.type}_${message.timestamp}"
             if (processedMessageKeys.contains(key)) return
 
-            if (processedMessageKeys.size > 300) {
+            if (processedMessageKeys.size > 500) {
                 processedMessageKeys.clear()
             }
             processedMessageKeys.add(key)
 
             onMessageReceived(message)
-        } catch (e: Exception) {
-            // Ignored
-        }
+        } catch (e: Exception) {}
     }
 
     private fun cleanupSocket() {
         pingJob?.cancel()
         pingJob = null
+        writerJob?.cancel()
+        writerJob = null
+        socketOutputStream = null
         try {
             activeSocket?.close()
         } catch (e: Exception) {}
         activeSocket = null
-        socketOutputStream = null
     }
 
     fun disconnect() {
@@ -387,6 +445,9 @@ class RealtimeRoomClient(
         } catch (e: Exception) {}
         lanSocket = null
 
+        outgoingQueue.clear()
+        lastRetainedAnnounce = null
+        lastRetainedPlayback = null
         currentRoomId = null
         processedMessageKeys.clear()
         _connectionState.value = ConnectionState.DISCONNECTED
@@ -514,6 +575,14 @@ class RealtimeRoomClient(
         msg.emoji?.let { obj.put("emoji", it) }
         msg.videoFrameBase64?.let { obj.put("videoFrameBase64", it) }
         msg.audioPacketBase64?.let { obj.put("audioPacketBase64", it) }
+        msg.targetUserId?.let { obj.put("targetUserId", it) }
+        msg.sdpType?.let { obj.put("sdpType", it) }
+        msg.sdpDescription?.let { obj.put("sdpDescription", it) }
+        msg.iceCandidateSdp?.let { obj.put("iceCandidateSdp", it) }
+        msg.iceCandidateSdpMid?.let { obj.put("iceCandidateSdpMid", it) }
+        msg.iceCandidateSdpMLineIndex?.let { obj.put("iceCandidateSdpMLineIndex", it) }
+        msg.creatorId?.let { obj.put("creatorId", it) }
+        msg.createdAt?.let { obj.put("createdAt", it) }
         obj.put("timestamp", msg.timestamp)
         return obj.toString()
     }
@@ -542,6 +611,14 @@ class RealtimeRoomClient(
             emoji = if (json.has("emoji")) json.optString("emoji", null) else null,
             videoFrameBase64 = if (json.has("videoFrameBase64")) json.optString("videoFrameBase64", null) else null,
             audioPacketBase64 = if (json.has("audioPacketBase64")) json.optString("audioPacketBase64", null) else null,
+            targetUserId = if (json.has("targetUserId")) json.optString("targetUserId", null) else null,
+            sdpType = if (json.has("sdpType")) json.optString("sdpType", null) else null,
+            sdpDescription = if (json.has("sdpDescription")) json.optString("sdpDescription", null) else null,
+            iceCandidateSdp = if (json.has("iceCandidateSdp")) json.optString("iceCandidateSdp", null) else null,
+            iceCandidateSdpMid = if (json.has("iceCandidateSdpMid")) json.optString("iceCandidateSdpMid", null) else null,
+            iceCandidateSdpMLineIndex = if (json.has("iceCandidateSdpMLineIndex")) json.optInt("iceCandidateSdpMLineIndex") else null,
+            creatorId = if (json.has("creatorId")) json.optString("creatorId", null) else null,
+            createdAt = if (json.has("createdAt")) json.optLong("createdAt") else null,
             timestamp = json.optLong("timestamp", System.currentTimeMillis())
         )
     }

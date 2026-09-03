@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -56,12 +57,18 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.example.data.RoomParticipant
+import com.example.webrtc.RemotePeerMedia
+import org.webrtc.EglBase
+import org.webrtc.RendererCommon
+import org.webrtc.SurfaceViewRenderer
+import org.webrtc.VideoTrack
 import java.io.ByteArrayOutputStream
 
 /**
  * Real-time floating camera bubble:
- * - When self & camera on: renders live front camera preview and captures frames to broadcast.
- * - When peer & camera on: renders incoming live video feed from peer.
+ * - When self & camera on: renders live front camera (hardware WebRTC or CameraX fallback)
+ *   and captures frames to broadcast.
+ * - When peer & camera on: renders live WebRTC hardware stream (or JPEG stream fallback).
  * - When camera off: renders avatar with camera-off indicator.
  * - Displays live mic status and participant name tag.
  */
@@ -72,21 +79,13 @@ fun CameraBubble(
     isCameraEnabled: Boolean,
     isMicrophoneEnabled: Boolean,
     peerBitmap: Bitmap? = null,
+    remotePeerMedia: RemotePeerMedia? = null,
+    localVideoTrack: VideoTrack? = null,
+    eglBase: EglBase? = null,
     onFrameCaptured: ((ByteArray) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "pulseScale"
-    )
 
     val isSpeaking = if (isSelf) isMicrophoneEnabled else !participant.isMuted
     val showCamera = if (isSelf) isCameraEnabled else participant.isCameraOn
@@ -105,14 +104,31 @@ fun CameraBubble(
         contentAlignment = Alignment.Center
     ) {
         if (showCamera && isSelf) {
-            // Live front camera preview for local user with frame capture
-            CameraPreview(
-                context = context,
-                onFrameCaptured = onFrameCaptured,
+            // Live front camera preview for local user
+            if (localVideoTrack != null && eglBase != null) {
+                WebRtcSurfaceRenderer(
+                    videoTrack = localVideoTrack,
+                    eglBaseContext = eglBase.eglBaseContext,
+                    isMirror = true,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                CameraPreview(
+                    context = context,
+                    onFrameCaptured = onFrameCaptured,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        } else if (showCamera && !isSelf && remotePeerMedia?.videoTrack != null && eglBase != null) {
+            // Live WebRTC hardware video stream from remote peer
+            WebRtcSurfaceRenderer(
+                videoTrack = remotePeerMedia.videoTrack,
+                eglBaseContext = eglBase.eglBaseContext,
+                isMirror = false,
                 modifier = Modifier.fillMaxSize()
             )
         } else if (showCamera && !isSelf && peerBitmap != null) {
-            // Live video stream from remote peer
+            // Live video stream from remote peer (fallback stream)
             Image(
                 bitmap = peerBitmap.asImageBitmap(),
                 contentDescription = participant.name,
@@ -165,7 +181,7 @@ fun CameraBubble(
                     modifier = Modifier.size(22.dp)
                 )
             }
-        } else if (!isSelf && peerBitmap == null) {
+        } else if (!isSelf && remotePeerMedia?.videoTrack == null && peerBitmap == null) {
             // Camera is on but first frame is buffering
             Box(
                 modifier = Modifier
@@ -174,9 +190,9 @@ fun CameraBubble(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = "LIVE",
+                    text = "CONNECTING",
                     style = MaterialTheme.typography.labelSmall.copy(
-                        fontSize = 9.sp,
+                        fontSize = 8.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFFE5A93C)
                     )
@@ -206,25 +222,58 @@ fun CameraBubble(
             )
         }
 
-        // Name tag at top
+        // Name tag at bottom of bubble
         Box(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 3.dp)
-                .background(Color.Black.copy(alpha = 0.65f), CircleShape)
-                .padding(horizontal = 6.dp, vertical = 1.dp)
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 2.dp)
+                .background(Color.Black.copy(alpha = 0.75f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 4.dp, vertical = 1.dp)
         ) {
             Text(
-                text = if (isSelf) "You" else participant.name.take(6),
+                text = if (isSelf) "You" else participant.name.split(" ").firstOrNull() ?: participant.name,
                 style = MaterialTheme.typography.labelSmall.copy(
                     fontSize = 8.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = Color.White
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
                 ),
                 maxLines = 1
             )
         }
     }
+}
+
+/**
+ * Native WebRTC SurfaceViewRenderer wrapped inside Jetpack Compose.
+ */
+@Composable
+fun WebRtcSurfaceRenderer(
+    videoTrack: VideoTrack,
+    eglBaseContext: EglBase.Context,
+    isMirror: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    AndroidView(
+        factory = { ctx ->
+            SurfaceViewRenderer(ctx).apply {
+                init(eglBaseContext, null)
+                setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
+                setEnableHardwareScaler(true)
+                setMirror(isMirror)
+                videoTrack.addSink(this)
+            }
+        },
+        update = { renderer ->
+            renderer.setMirror(isMirror)
+        },
+        onRelease = { renderer ->
+            try {
+                videoTrack.removeSink(renderer)
+                renderer.release()
+            } catch (e: Exception) {}
+        },
+        modifier = modifier
+    )
 }
 
 @Composable
@@ -330,6 +379,9 @@ fun ParticipantBubblesStack(
     isCameraEnabled: Boolean,
     isMicrophoneEnabled: Boolean,
     peerVideoFrames: Map<String, Bitmap> = emptyMap(),
+    remotePeers: Map<String, RemotePeerMedia> = emptyMap(),
+    localVideoTrack: VideoTrack? = null,
+    eglBase: EglBase? = null,
     onFrameCaptured: ((ByteArray) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -346,6 +398,8 @@ fun ParticipantBubblesStack(
                 isSelf = true,
                 isCameraEnabled = isCameraEnabled,
                 isMicrophoneEnabled = isMicrophoneEnabled,
+                localVideoTrack = localVideoTrack,
+                eglBase = eglBase,
                 onFrameCaptured = onFrameCaptured
             )
         }
@@ -357,7 +411,9 @@ fun ParticipantBubblesStack(
                 isSelf = false,
                 isCameraEnabled = peer.isCameraOn,
                 isMicrophoneEnabled = !peer.isMuted,
-                peerBitmap = peerVideoFrames[peer.id]
+                peerBitmap = peerVideoFrames[peer.id],
+                remotePeerMedia = remotePeers[peer.id],
+                eglBase = eglBase
             )
         }
     }

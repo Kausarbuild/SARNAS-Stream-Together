@@ -1,13 +1,17 @@
 package com.example.sync
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
+import android.util.Log
 import com.example.audio.VoiceChatManager
 import com.example.data.PlaybackAction
 import com.example.data.PlaybackState
 import com.example.data.RoomParticipant
 import com.example.data.UserProfile
+import com.example.webrtc.RemotePeerMedia
+import com.example.webrtc.WebRtcManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +25,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.webrtc.EglBase
+import org.webrtc.VideoTrack
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -34,6 +40,7 @@ data class SyncNotification(
 
 class RoomSyncManager private constructor() {
 
+    private val tag = "RoomSyncManager"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val _roomId = MutableStateFlow("")
@@ -63,9 +70,17 @@ class RoomSyncManager private constructor() {
     private val _isMicrophoneEnabled = MutableStateFlow(true)
     val isMicrophoneEnabled: StateFlow<Boolean> = _isMicrophoneEnabled.asStateFlow()
 
-    // Live remote participant camera frames decoded into Bitmaps
+    // Live remote participant camera frames decoded into Bitmaps (fallback transport)
     private val _peerVideoFrames = MutableStateFlow<Map<String, Bitmap>>(emptyMap())
     val peerVideoFrames: StateFlow<Map<String, Bitmap>> = _peerVideoFrames.asStateFlow()
+
+    // Real WebRTC peer media state flow
+    private val _remotePeers = MutableStateFlow<Map<String, RemotePeerMedia>>(emptyMap())
+    val remotePeers: StateFlow<Map<String, RemotePeerMedia>> = _remotePeers.asStateFlow()
+
+    private var appContext: Context? = null
+    var webRtcManager: WebRtcManager? = null
+        private set
 
     private var currentUserProfile: UserProfile? = null
     private var isHostUser = false
@@ -81,9 +96,17 @@ class RoomSyncManager private constructor() {
 
     val connectionState: StateFlow<ConnectionState> = networkClient.connectionState
 
+    fun initContext(context: Context) {
+        appContext = context.applicationContext
+    }
+
     suspend fun verifyRoomExists(roomId: String): RoomVerificationResult {
         return networkClient.verifyRoomExists(roomId)
     }
+
+    fun getEglBase(): EglBase? = webRtcManager?.rootEglBase
+
+    fun getLocalVideoTrack(): VideoTrack? = webRtcManager?.localVideoTrack
 
     fun joinRoom(
         roomId: String,
@@ -91,8 +114,11 @@ class RoomSyncManager private constructor() {
         currentUser: UserProfile,
         isHost: Boolean = false,
         initialVideoUrl: String? = null,
-        initialVideoTitle: String? = null
+        initialVideoTitle: String? = null,
+        context: Context? = null
     ) {
+        context?.let { initContext(it) }
+
         val cleanRoomId = roomId.trim().uppercase()
         _roomId.value = cleanRoomId
         _roomTitle.value = roomName
@@ -129,7 +155,10 @@ class RoomSyncManager private constructor() {
             _playbackState.value = PlaybackState()
         }
 
-        // Initialize real-time voice chat engine
+        // Initialize WebRTC P2P Video & Audio Engine
+        initWebRtc(currentUser)
+
+        // Initialize real-time voice chat engine (for fallback audio)
         initVoiceChat()
 
         // Connect to Realtime Network Bus
@@ -149,7 +178,9 @@ class RoomSyncManager private constructor() {
                 isCameraOn = _isCameraEnabled.value,
                 isMuted = !_isMicrophoneEnabled.value,
                 videoUrl = initialVideoUrl,
-                videoTitle = initialVideoTitle
+                videoTitle = initialVideoTitle,
+                creatorId = if (isHost) currentUser.id else null,
+                createdAt = System.currentTimeMillis()
             )
         )
 
@@ -186,10 +217,11 @@ class RoomSyncManager private constructor() {
                 delay(4000)
                 val user = currentUserProfile ?: break
 
-                // 1. Send our presence heartbeat
+                // 1. Send our presence heartbeat (retaining metadata on broker if host)
+                val heartbeatType = if (isHostUser) "ROOM_ANNOUNCE" else "HEARTBEAT"
                 networkClient.broadcast(
                     RealtimeMessage(
-                        type = "HEARTBEAT",
+                        type = heartbeatType,
                         roomId = cleanRoomId,
                         senderId = user.id,
                         senderName = user.name,
@@ -197,11 +229,15 @@ class RoomSyncManager private constructor() {
                         avatarColorHex = user.avatarColorHex,
                         isHost = isHostUser,
                         isCameraOn = _isCameraEnabled.value,
-                        isMuted = !_isMicrophoneEnabled.value
+                        isMuted = !_isMicrophoneEnabled.value,
+                        videoUrl = _playbackState.value.videoUrl,
+                        videoTitle = _playbackState.value.videoTitle,
+                        isPlaying = _playbackState.value.isPlaying,
+                        positionMs = _playbackState.value.positionMs
                     )
                 )
 
-                // 2. Prune disconnected participants (if no heartbeat for > 45 seconds to prevent false disconnects)
+                // 2. Prune disconnected participants (if no heartbeat for > 45 seconds)
                 val now = System.currentTimeMillis()
                 val activeList = _participants.value.filter { p ->
                     if (p.id == user.id) true
@@ -217,6 +253,51 @@ class RoomSyncManager private constructor() {
         }
     }
 
+    private fun initWebRtc(currentUser: UserProfile) {
+        val ctx = appContext ?: return
+        try {
+            webRtcManager?.close()
+            val rtc = WebRtcManager(
+                context = ctx,
+                myUserId = currentUser.id,
+                sendSignal = { type, targetUserId, sdpType, sdpDesc, iceSdp, iceMid, iceIndex ->
+                    networkClient.broadcast(
+                        RealtimeMessage(
+                            type = type,
+                            roomId = _roomId.value,
+                            senderId = currentUser.id,
+                            senderName = currentUser.name,
+                            targetUserId = targetUserId,
+                            sdpType = sdpType,
+                            sdpDescription = sdpDesc,
+                            iceCandidateSdp = iceSdp,
+                            iceCandidateSdpMid = iceMid,
+                            iceCandidateSdpMLineIndex = iceIndex
+                        )
+                    )
+                }
+            )
+            webRtcManager = rtc
+
+            // Start audio track
+            rtc.startLocalAudio(initialMuted = !_isMicrophoneEnabled.value)
+
+            // Start video track if enabled
+            if (_isCameraEnabled.value) {
+                rtc.startLocalVideo(initialCameraOn = true)
+            }
+
+            // Observe remote peers
+            scope.launch {
+                rtc.remotePeers.collect { peers ->
+                    _remotePeers.value = peers
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to initialize WebRTC engine: ${e.message}", e)
+        }
+    }
+
     private fun initVoiceChat() {
         voiceChatManager?.release()
         voiceChatManager = VoiceChatManager { audioBytes ->
@@ -229,7 +310,6 @@ class RoomSyncManager private constructor() {
 
     private fun sendAudioPacket(bytes: ByteArray) {
         val now = System.currentTimeMillis()
-        // Rate-limit cloud transmission to ~10 packets/s; local LAN UDP is already unthrottled in VoiceChatManager
         if (now - lastAudioCloudSend > 100) {
             lastAudioCloudSend = now
             val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
@@ -268,6 +348,37 @@ class RoomSyncManager private constructor() {
 
         scope.launch {
             when (msg.type) {
+                // --- WebRTC Signaling Channels ---
+                "WEBRTC_OFFER" -> {
+                    if (msg.targetUserId == null || msg.targetUserId == myId) {
+                        msg.sdpDescription?.let { sdp ->
+                            webRtcManager?.handleRemoteOffer(msg.senderId, sdp)
+                        }
+                    }
+                }
+
+                "WEBRTC_ANSWER" -> {
+                    if (msg.targetUserId == null || msg.targetUserId == myId) {
+                        msg.sdpDescription?.let { sdp ->
+                            webRtcManager?.handleRemoteAnswer(msg.senderId, sdp)
+                        }
+                    }
+                }
+
+                "WEBRTC_ICE_CANDIDATE" -> {
+                    if (msg.targetUserId == null || msg.targetUserId == myId) {
+                        msg.iceCandidateSdp?.let { sdp ->
+                            webRtcManager?.handleRemoteIceCandidate(
+                                senderId = msg.senderId,
+                                sdp = sdp,
+                                sdpMid = msg.iceCandidateSdpMid,
+                                sdpMLineIndex = msg.iceCandidateSdpMLineIndex ?: 0
+                            )
+                        }
+                    }
+                }
+
+                // --- Room Presence & Management ---
                 "ROOM_ANNOUNCE", "JOIN" -> {
                     val newParticipant = RoomParticipant(
                         id = msg.senderId,
@@ -281,7 +392,12 @@ class RoomSyncManager private constructor() {
                     addOrUpdateParticipant(newParticipant)
                     notifySync("${msg.senderName} is in the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
 
-                    // If we are already in the room, immediately announce ourselves back to the new participant
+                    // Initiate WebRTC call if we are host or have higher ID
+                    if (isHostUser || myId > msg.senderId) {
+                        webRtcManager?.initiateCallToPeer(msg.senderId)
+                    }
+
+                    // Immediately announce ourselves back to the new participant
                     val myProfile = currentUserProfile
                     if (myProfile != null) {
                         networkClient.broadcast(
@@ -299,7 +415,7 @@ class RoomSyncManager private constructor() {
                         )
                     }
 
-                    // If we have an active video stream or are host, reply with SYNC_STATE so the new user immediately syncs
+                    // If we have an active video stream, reply with SYNC_STATE
                     val curPlay = _playbackState.value
                     if (curPlay.videoUrl.isNotBlank()) {
                         networkClient.broadcast(
@@ -353,9 +469,7 @@ class RoomSyncManager private constructor() {
                                 _peerVideoFrames.value = _peerVideoFrames.value + (msg.senderId to bitmap)
                                 updateParticipant(msg.senderId) { it.copy(isCameraOn = true) }
                             }
-                        } catch (e: Exception) {
-                            // Ignored
-                        }
+                        } catch (e: Exception) {}
                     }
                 }
 
@@ -364,9 +478,7 @@ class RoomSyncManager private constructor() {
                         try {
                             val bytes = Base64.decode(msg.audioPacketBase64, Base64.NO_WRAP)
                             voiceChatManager?.playMuLawAudio(bytes)
-                        } catch (e: Exception) {
-                            // Ignored
-                        }
+                        } catch (e: Exception) {}
                     }
                 }
 
@@ -525,6 +637,7 @@ class RoomSyncManager private constructor() {
 
                 "LEAVE" -> {
                     removeParticipant(msg.senderId)
+                    webRtcManager?.removePeer(msg.senderId)
                     _peerVideoFrames.value = _peerVideoFrames.value - msg.senderId
                     notifySync("${msg.senderName} left the room", msg.senderName, PlaybackAction.INITIAL_SYNC)
                 }
@@ -556,12 +669,26 @@ class RoomSyncManager private constructor() {
     fun setCameraEnabled(enabled: Boolean, userId: String) {
         _isCameraEnabled.value = enabled
         updateParticipant(userId) { it.copy(isCameraOn = enabled) }
+
+        // Update WebRTC camera track
+        webRtcManager?.let { rtc ->
+            if (enabled && rtc.localVideoTrack == null) {
+                rtc.startLocalVideo(true)
+            } else {
+                rtc.setCameraEnabled(enabled)
+            }
+        }
+
         broadcastMediaStatus()
     }
 
     fun setMicrophoneEnabled(enabled: Boolean, userId: String) {
         _isMicrophoneEnabled.value = enabled
         updateParticipant(userId) { it.copy(isMuted = !enabled) }
+
+        // Update WebRTC microphone track
+        webRtcManager?.setMicrophoneMuted(!enabled)
+
         if (enabled) {
             voiceChatManager?.startRecording()
         } else {
@@ -841,8 +968,14 @@ class RoomSyncManager private constructor() {
         }
         heartbeatJob?.cancel()
         heartbeatJob = null
+
+        webRtcManager?.close()
+        webRtcManager = null
+        _remotePeers.value = emptyMap()
+
         voiceChatManager?.release()
         voiceChatManager = null
+
         networkClient.disconnect()
         participantLastSeen.clear()
         _peerVideoFrames.value = emptyMap()

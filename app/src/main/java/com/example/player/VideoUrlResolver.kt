@@ -126,9 +126,9 @@ object VideoUrlResolver {
         // 2. Match Google Drive links
         val googleDriveId = extractGoogleDriveFileId(trimmed)
         if (googleDriveId != null) {
-            val primaryDriveUrl = "https://drive.usercontent.google.com/download?id=$googleDriveId&export=download&authuser=0&confirm=t"
-            val secondaryDriveUrl = "https://lh3.googleusercontent.com/d/$googleDriveId"
-            val tertiaryDriveUrl = "https://drive.google.com/uc?export=download&confirm=t&id=$googleDriveId"
+            val primaryDriveUrl = "https://drive.google.com/uc?export=download&id=$googleDriveId"
+            val secondaryDriveUrl = "https://drive.usercontent.google.com/download?id=$googleDriveId&export=download&authuser=0&confirm=t"
+            val tertiaryDriveUrl = "https://lh3.googleusercontent.com/d/$googleDriveId"
             val directApiUrl = "https://docs.google.com/uc?export=download&id=$googleDriveId"
 
             return Result.success(

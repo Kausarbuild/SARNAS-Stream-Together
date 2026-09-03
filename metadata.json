@@ -1,6 +1,6 @@
 {
   "name": "SARNAS",
-  "description": "Stream Together — A premium social watch-together app for watching videos together in real time.",
+  "description": "Stream Together — A premium social watch-together app for watching videos together in real time with synchronized playback.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
